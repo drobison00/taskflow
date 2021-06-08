@@ -164,7 +164,8 @@ int main(int argc, char **argv) {
 
     uint32_t buffer_size = 5e6;
     RingBuffer<std::string> stage_1_ring_buffer(buffer_size);
-    RingBuffer<json> stage2_ring_buffer(buffer_size);
+    RingBuffer<json> stage_2_ring_buffer(buffer_size);
+    RingBuffer<json> stage_1_ring_buffer_remote(buffer_size);
 
     int index_1_start = 0, index_1_end = 0;
     int stage_1_stride = 1000;
@@ -177,11 +178,7 @@ int main(int argc, char **argv) {
 
     taskflow.name("Processing Pipeline");
     taskflow_remote.name("Remote Socket Pipeline");
-    tf::Taskflow stage_1_subflow, stage2_subflow;
-
-    std::atomic<int> buffer_trailing_index_remote(0);
-    std::atomic<int> buffer_leading_index_remote(0);
-    std::vector<json> stage_1_buffer_remote;
+    tf::Taskflow stage_1_subflow, stage_2_subflow;
 
     // Launch thread that runs for a fixed length of time and then sets the exit flag.
     std::thread timeout_thread([&running, timeout]() {
@@ -219,8 +216,6 @@ int main(int argc, char **argv) {
     // Alternate taskflow to simulate a remote service waiting to receive socket data.
     tf::Task init_remote = taskflow_remote.emplace([&]() {
         std::cout << "Starting Remote Control Flow" << std::endl;
-
-        stage_1_buffer_remote.reserve(buffer_size);
 
         executor.async([&]() {
             int server_fd, new_socket, readsz;
@@ -296,7 +291,9 @@ int main(int argc, char **argv) {
                             for (int i = 0; i < readsz; i++) {
                                 s += buf[i];
                                 if (buf[i] == '\0') {
-                                    buffer_leading_index_remote += 1;
+                                    auto parsed_data = json::parse(s);
+                                    // Don't push anything yet, because we're not doing anything with it.
+                                    //stage_1_ring_buffer_remote.push(s);
                                     s.clear();
                                 }
                             }
@@ -344,21 +341,21 @@ int main(int argc, char **argv) {
                 auto j = index_2_start + offset;
                 for (auto k = x; k < x + stage_1_stride && k < index_1_end; k++, j++) {
                     auto _k = k % stage_1_ring_buffer.end();
-                    auto _j = j % stage2_ring_buffer.end();
+                    auto _j = j % stage_2_ring_buffer.end();
                     auto parsed_data = json::parse(stage_1_ring_buffer[_k]);
 
-                    stage2_ring_buffer[_j] = parsed_data;
+                    stage_2_ring_buffer[_j] = parsed_data;
                 }
             }).name("Stage_1 for_each_index");
 
-        stage2_subflow.for_each_index(std::ref(index_2_start), std::ref(index_2_end), stage_2_stride,
+        stage_2_subflow.for_each_index(std::ref(index_2_start), std::ref(index_2_end), stage_2_stride,
             [&](auto x) {
               std::stringstream sstream;
 
               // Do some arbitrary JSON operations.
               for (int k = x; k < x + stage_2_stride && k < index_2_end; k++) {
-                  auto _k = k % stage2_ring_buffer.end();
-                  auto j = stage2_ring_buffer[_k];
+                  auto _k = k % stage_2_ring_buffer.end();
+                  auto j = stage_2_ring_buffer[_k];
                   j["some field"] = "some value";
                   j["some list"] = {'a', 'b', 'c'};
                   j["some dict"] = { {"thing1", 1}, {"thing2", 3.1411111} };
@@ -377,10 +374,10 @@ int main(int argc, char **argv) {
                           j["is_http_dest"] = false;
                       }
                   }
-                  stage2_ring_buffer[_k] = j;
+                  stage_2_ring_buffer[_k] = j;
               }
             }).name("Stage2 for_each_index");
-        stage2_subflow.name("Work phase 2");
+        stage_2_subflow.name("Work phase 2");
 
         std::ofstream file;
         file.open("subflow1.dot");
@@ -388,7 +385,7 @@ int main(int argc, char **argv) {
         file.close();
 
         file.open("subflow2.dot");
-        stage2_subflow.dump(file);
+        stage_2_subflow.dump(file);
         file.close();
 
         // Sample Async execution, injects data into our pipeline
@@ -429,7 +426,7 @@ int main(int argc, char **argv) {
 
         if (n != 0) {
             int dst_start;
-            dst_start = stage2_ring_buffer.reserve_working_range(n);
+            dst_start = stage_2_ring_buffer.reserve_working_range(n);
             index_2_start = dst_start;
             index_2_end = dst_start + n;
 
@@ -442,17 +439,17 @@ int main(int argc, char **argv) {
     tf::Task stage_1_return = taskflow.emplace([&]() {
         if (not running) { return 2; }
 
-        if (not stage2_ring_buffer.empty()) { return 1; }
+        if (not stage_2_ring_buffer.empty()) { return 1; }
 
         return 0;
     }).name("stage_1_cond");
 
     tf::Task stage_2 = taskflow.emplace([&]() {
-        executor.run(stage2_subflow).get();
+        executor.run(stage_2_subflow).get();
 
         for (int i = index_2_start; i < index_2_end; i++) {
             std::stringstream sstream;
-            sstream << stage2_ring_buffer[i % stage2_ring_buffer.end()];
+            sstream << stage_2_ring_buffer[i % stage_2_ring_buffer.end()];
 
             int slen = sstream.str().size();
             char *cstr = new char[slen + 1]{0};
@@ -460,7 +457,7 @@ int main(int argc, char **argv) {
             int sent = send(_sock, cstr, slen + 1, 0);
         }
         processed += (index_2_end - index_2_start);
-        stage2_ring_buffer.pop_n(index_2_end - index_2_start);
+        stage_2_ring_buffer.pop_n(index_2_end - index_2_start);
     }).name("stage 2");
 
     tf::Task stage_2_return = taskflow.emplace([]() {
