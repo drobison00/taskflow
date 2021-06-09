@@ -204,7 +204,7 @@ int main(int argc, char **argv) {
     // Periodically print calculated throughput and source queue size.
     std::thread throughput_compute_thread([&]() {
         int pstart, freq_ms = 33;
-        double avg = 0.0, avg_inq = 0.0, scale_factor = 1000 / freq_ms;
+        double avg = 0.0, avg_q1 = 0.0, avg_q2 = 0.0, avg_q3 = 0.0, scale_factor = 1000 / freq_ms;
         std::stringstream sstream;
 
         sstream << "Average throughput: " << avg << " records/sec";
@@ -213,14 +213,20 @@ int main(int argc, char **argv) {
             pstart = processed;
             std::this_thread::sleep_for(milliseconds(freq_ms));
             avg = (avg * 0.99 + (processed - pstart) * scale_factor * 0.01);
-            avg_inq = (avg_inq * 0.99 + (stage_1_queue.size_approx()) * 0.01);
+            avg_q1 = (avg_q1 * 0.99 + (stage_1_queue.size_approx()) * 0.01);
+            avg_q2 = (avg_q2 * 0.99 + (stage_2_queue.size_approx()) * 0.01);
+            avg_q2 = (avg_q3 * 0.99 + (stage_3_queue.size_approx()) * 0.01);
             auto cur_time = steady_clock::now();
             duration<double> elapsed = cur_time - start_time;
 
             sstream.str("");
-            sstream << "Average throughput: " << std::setw(15) << avg << " records/sec,  average inqueue: " <<
-                    std::setw(10) << avg_inq << " processed: " << std::setw(12) << processed <<
-                    " runtime: " << std::setw(10) << elapsed.count() << " sec.\r";
+            sstream << "Average throughput: " <<
+                    std::setw(15) << avg << " records/sec" <<
+                    " avg.q1: " << std::setw(8) << avg_q1 <<
+                    " avg.q2: " << std::setw(8) << avg_q2 <<
+                    " avg.q3: " << std::setw(8) << avg_q3 <<
+                    " processed: " << std::setw(10) << processed <<
+                    " runtime: " << std::setw(8) << elapsed.count() << " sec.\r";
             std::cout << sstream.str() << std::flush;
         }
         std::cout << "Stopping throughput thread." << std::endl;
@@ -361,19 +367,6 @@ int main(int argc, char **argv) {
 
                                            j = json::parse(s);
                                            stage_2_queue.enqueue(j);
-
-                                           /*size_t count;
-                                           std::string s[stage_1_stride];
-
-                                           count = stage_1_queue.try_dequeue_bulk(&s[0], stage_1_stride);
-                                           if (count == 0) { return; }
-                                           json j[count];
-
-                                           for (int k = 0; k < count; k++) {
-                                               j[k] = json::parse(s[k]);
-                                           }
-                                           success = stage_2_queue.try_enqueue_bulk(&j[0], count);
-                                           */
                                        }).name("Stage_1 for_each_index");
 
         stage_2_subflow.for_each_index(std::ref(stage_2_start), std::ref(stage_2_count), stage_2_stride,
@@ -454,11 +447,11 @@ int main(int argc, char **argv) {
             executor.async([&]() {
                 size_t count;
                 // try to allocate memory
-                std::string s[100];
-                json j[100];
+                std::string s[1000];
+                json j[1000];
 
                 while (running) {
-                    count = stage_1_queue.try_dequeue_bulk(&s[0], 100);
+                    count = stage_1_queue.try_dequeue_bulk(&s[0], 1000);
 
                     for (int i = 0; i < count; ++i) {
                         j[i] = json::parse(s[i]);
@@ -489,10 +482,10 @@ int main(int argc, char **argv) {
 
             executor.async([&]() {
                 size_t count;
-                json j[100];
+                json j[1000];
 
                 while (running) {
-                    count = stage_2_queue.try_dequeue_bulk(&j[0], 100);
+                    count = stage_2_queue.try_dequeue_bulk(&j[0], 1000);
 
                     for (int i = 0; i < count; i++) {
                         j[i]["some field"] = "some value";
@@ -543,10 +536,10 @@ int main(int argc, char **argv) {
                 char *cstr;
 
                 size_t count;
-                json j[100];
+                json j[1000];
 
                 while (running) {
-                    count = stage_3_queue.try_dequeue_bulk(&j[0], 100);
+                    count = stage_3_queue.try_dequeue_bulk(&j[0], 1000);
 
                     for (int i = 0; i < count; i++) {
                         std::stringstream sstream;
@@ -556,7 +549,7 @@ int main(int argc, char **argv) {
                         cstr = new char[slen + 1]{0};
 
                         std::strcpy(cstr, sstream.str().c_str());
-                        //sent = send(_sock, cstr, slen + 1, 0);
+                        sent = send(_sock, cstr, slen + 1, 0);
 
                         delete cstr;
                         processed += 1;
