@@ -4,6 +4,7 @@
 // Create a control taskflow that pulls from a shared priority queue while a shared state variable is true. Each pulled
 //  value is then passed to an asynchronous taskflow handler for execution.
 //
+#include <assert.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -15,6 +16,8 @@
 #include <iostream>
 #include <string>
 
+#include <concurrentqueue.h>
+
 #include <nlohmann/json.hpp>
 #include <taskflow/taskflow.hpp>  // Taskflow is header-only
 
@@ -22,43 +25,47 @@
 using namespace std::chrono;
 using json = nlohmann::json;
 
-template <class T>
-class RingBuffer {
+/** template <class T>
+class ChunkedRingBuffer {
 public:
-    RingBuffer() : buffer_size{1e6}, capacity{1e6}, current_size{0}, trailing_index{0}, leading_index{0} {
+    ChunkedRingBuffer() : buffer_size{2<<21}, chunk_size{2<<15},
+    capacity{2<<21}, current_size{0}, trailing_index{0}, leading_index{0} {
+        buffer.reserve();
+    }
+
+    ChunkedRingBuffer(uint32_t size, uint32_t chunk_size) : buffer_size{size}, chunk_size{chunk_size},
+    capacity{size}, current_size{0}, trailing_index{0}, leading_index{0} {
+        assert(buffer_size > chunk_size);
+        assert(buffer_size % chunk_size == 0);
         buffer.reserve(size);
-    };
-    RingBuffer(uint32_t size) : buffer_size{size}, capacity{size}, current_size{0}, trailing_index{0}, leading_index{0} {
-        buffer.reserve(size);
-    };
+    }
 
     void push(const T& value) {
-        std::lock_guard<std::mutex> m(lock);
         if (capacity == 0) {
             // Maybe add some kind of soft reject for throttling
             throw std::out_of_range("Attempted push to full buffer.");
         }
 
+        capacity -= 1;
+        current_size = buffer_size - capacity;
+
         buffer[leading_index++] = value;
         leading_index = leading_index % buffer_size;
-        capacity -= 1;
-        current_size += 1;
     }
 
     void push(T& value) {
-        std::lock_guard<std::mutex> m(lock);
         if (capacity == 0) {
             throw std::out_of_range("Attempted push to full buffer.");
         }
 
+        capacity -= 1;
+        current_size = buffer_size - capacity;
+
         buffer[leading_index++] = value;
         leading_index = leading_index % buffer_size;
-        capacity -= 1;
-        current_size += 1;
     }
 
     void pop() {
-        std::lock_guard<std::mutex> m(lock);
         if (capacity == buffer_size) {
             throw std::out_of_range("Attempted to call pop empty buffer.");
         }
@@ -69,7 +76,6 @@ public:
     }
 
     void pop_n(int n) {
-        std::lock_guard<std::mutex> m(lock);
         if (n > current_size) {
             throw std::out_of_range("Attempt to pop 'n' items exceeds what is in the buffer.");
         }
@@ -95,32 +101,27 @@ public:
         return current_size;
     }
 
-    std::tuple<uint32_t, uint32_t> get_working_range() {
-        std::lock_guard<std::mutex> m(lock);
-
-        int n;
-        if (leading_index < trailing_index) {
-            n = buffer_size - trailing_index + leading_index;
-        } else {
-            n = leading_index - trailing_index;
-        }
-
-        return std::make_tuple(trailing_index, n);
-    }
-
-    // TODO Currently just for testing throughput. Won't work if multiple threads reserve their own range
-    uint32_t reserve_working_range(uint32_t n) {
-        std::lock_guard<std::mutex> m(lock);
-        if (capacity < n) {
-            throw std::out_of_range("Attempt reserve more elements than are available.");
-        }
-
+    // Reserve the next chunk in the buffer for writing
+    uint32_t reserve_chunk() {
         auto range_start = leading_index;
         leading_index = (leading_index + n) % buffer_size;
         capacity -= n;
         current_size += n;
 
         return range_start;
+    }
+
+    bool chunk_ready() {
+        return (leading_index - trailing_index >= chunk_size);
+    }
+
+    std::tuple<uint32_t, uint32_t> get_next_chunk() {
+        // return the current active chunk
+        if ()
+        auto chunk_size = trailing_index % chunk_size;
+        auto chunk_start = trailing_index % chunk_size;
+
+        return std::make_pair(chunk_start, chunk_size);
     }
 
     T& operator[](uint32_t idx) {
@@ -134,15 +135,17 @@ public:
     };
 
 private:
-    uint32_t buffer_size;
+    std::atomic<uint32_t> leading_index;
+    std::atomic<uint32_t> trailing_index;
+
+    const uint32_t chunk_size;
+    const uint32_t buffer_size;
+
     uint32_t capacity;
-    uint32_t leading_index;
-    uint32_t trailing_index;
     uint32_t current_size;
 
-    std::mutex lock;
     std::vector<T> buffer;
-};
+}; */
 
 
 // Ideas: Cascading async TaskFlows (modules)
@@ -159,18 +162,28 @@ int main(int argc, char **argv) {
         timeout = std::stoi(argv[2]);
     }
     int running = 1;
+
+    std::atomic<int> stage_1_running(0);
+    std::atomic<int> stage_2_running(0);
+    std::atomic<int> stage_3_running(0);
+
     long int processed = 0;
     int workers = 16;
 
-    uint32_t buffer_size = 5e6;
-    RingBuffer<std::string> stage_1_ring_buffer(buffer_size);
-    RingBuffer<json> stage_2_ring_buffer(buffer_size);
-    RingBuffer<json> stage_1_ring_buffer_remote(buffer_size);
+    uint32_t buffer_size = 2 << 21;
+    uint32_t chunk_size = 2 << 15;
 
-    int index_1_start = 0, index_1_end = 0;
-    int stage_1_stride = 10000;
-    int index_2_start = 0, index_2_end = 0;
-    int stage_2_stride = 10000;
+    moodycamel::ConcurrentQueue <std::string> stage_1_queue;
+    moodycamel::ConcurrentQueue <json> stage_2_queue;
+    moodycamel::ConcurrentQueue <json> stage_3_queue;
+    moodycamel::ConcurrentQueue <json> stage_1_remote_queue;
+
+    int stage_1_count = 0;
+    int stage_1_start = 0;
+    int stage_2_count = 0;
+    int stage_2_start = 0;
+    int stage_1_stride = 1;
+    int stage_2_stride = 1;
 
     std::srand(std::time(nullptr));
     tf::Executor executor(workers), executor_remote(2);
@@ -190,7 +203,7 @@ int main(int argc, char **argv) {
 
     // Periodically print calculated throughput and source queue size.
     std::thread throughput_compute_thread([&]() {
-        int pstart, freq_ms = 100;
+        int pstart, freq_ms = 33;
         double avg = 0.0, avg_inq = 0.0, scale_factor = 1000 / freq_ms;
         std::stringstream sstream;
 
@@ -198,9 +211,9 @@ int main(int argc, char **argv) {
         auto start_time = steady_clock::now();
         while (running != 0) {
             pstart = processed;
-            std::this_thread::sleep_for(std::chrono::milliseconds(freq_ms));
+            std::this_thread::sleep_for(milliseconds(freq_ms));
             avg = (avg * 0.99 + (processed - pstart) * scale_factor * 0.01);
-            avg_inq = (avg_inq * 0.99 + (stage_1_ring_buffer.size()) * 0.01);
+            avg_inq = (avg_inq * 0.99 + (stage_1_queue.size_approx()) * 0.01);
             auto cur_time = steady_clock::now();
             duration<double> elapsed = cur_time - start_time;
 
@@ -229,7 +242,7 @@ int main(int argc, char **argv) {
                 running = 0;
             }
 
-            if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt))){
+            if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt))) {
                 std::cout << "Failed to set socket opts" << std::endl;
                 running = 0;
             }
@@ -237,7 +250,7 @@ int main(int argc, char **argv) {
             address.sin_addr.s_addr = INADDR_ANY;
             address.sin_port = htons(12345);
 
-            if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
+            if (bind(server_fd, (struct sockaddr *) &address, sizeof(address)) < 0) {
                 std::cout << "Failed to bind server_fd" << std::endl;
                 running = 0;
             }
@@ -248,7 +261,7 @@ int main(int argc, char **argv) {
             }
 
             while (running) {
-                if ((new_socket = accept(server_fd, (struct sockaddr*)&address, (socklen_t*)&addrlen)) < 0){
+                if ((new_socket = accept(server_fd, (struct sockaddr *) &address, (socklen_t * ) & addrlen)) < 0) {
                     std::cout << "Failed to create new socket" << std::endl;
                 }
 
@@ -270,8 +283,8 @@ int main(int argc, char **argv) {
                     fds[0].events = POLLIN;
 
                     int error = 0;
-                    socklen_t len = sizeof (error);
-                    int retval = getsockopt (new_socket, SOL_SOCKET, SO_ERROR, &error, &len);
+                    socklen_t len = sizeof(error);
+                    int retval = getsockopt(new_socket, SOL_SOCKET, SO_ERROR, &error, &len);
 
                     if (retval || error) {
                         fprintf(stderr, "error getting socket error code: %s\n", strerror(retval));
@@ -279,7 +292,7 @@ int main(int argc, char **argv) {
                     }
 
                     if (poll(fds, 1, ptimeout)) {
-                        if (fds[0].revents & (POLLNVAL|POLLERR|POLLHUP)) {
+                        if (fds[0].revents & (POLLNVAL | POLLERR | POLLHUP)) {
                             std::cout << "Something terrible happened" << std::endl << std::flush;
                             shutdown(new_socket, SHUT_RD);
                             close(new_socket);
@@ -319,11 +332,11 @@ int main(int argc, char **argv) {
 
     _serv_addr.sin_family = AF_INET;
     _serv_addr.sin_port = htons(12345);
-    if (inet_pton(AF_INET, "127.0.0.1", &_serv_addr.sin_addr) <= 0){
+    if (inet_pton(AF_INET, "127.0.0.1", &_serv_addr.sin_addr) <= 0) {
         std::cout << "Invalid address" << std::endl;
     }
 
-    if (connect(_sock, (struct sockaddr *)&_serv_addr, sizeof(_serv_addr)) < 0){
+    if (connect(_sock, (struct sockaddr *) &_serv_addr, sizeof(_serv_addr)) < 0) {
         std::cout << "Connection failed" << std::endl;
     }
 
@@ -334,49 +347,68 @@ int main(int argc, char **argv) {
         std::cout << "Starting Control Flow\n";
 
         // Simple dynamic task creation -- strided iteration loops.
+
         stage_1_subflow.name("Work phase 1");
-        stage_1_subflow.for_each_index(std::ref(index_1_start), std::ref(index_1_end), stage_1_stride,
-            [&](int x) {
-                auto offset = x - index_1_start;
-                auto j = index_2_start + offset;
-                for (auto k = x; k < x + stage_1_stride && k < index_1_end; k++, j++) {
-                    auto _k = k % stage_1_ring_buffer.end();
-                    auto _j = j % stage_2_ring_buffer.end();
-                    auto parsed_data = json::parse(stage_1_ring_buffer[_k]);
+        stage_1_subflow.for_each_index(std::ref(stage_1_start), std::ref(stage_1_count), stage_1_stride,
+                                       [&](int x) {
+                                           bool success;
+                                           // try to allocate memory
+                                           std::string s;
+                                           json j;
 
-                    stage_2_ring_buffer[_j] = parsed_data;
-                }
-            }).name("Stage_1 for_each_index");
+                                           success = stage_1_queue.try_dequeue(s);
+                                           if (!success) { return; }
 
-        stage_2_subflow.for_each_index(std::ref(index_2_start), std::ref(index_2_end), stage_2_stride,
-            [&](auto x) {
-              std::stringstream sstream;
+                                           j = json::parse(s);
+                                           stage_2_queue.enqueue(j);
 
-              // Do some arbitrary JSON operations.
-              for (int k = x; k < x + stage_2_stride && k < index_2_end; k++) {
-                  auto _k = k % stage_2_ring_buffer.end();
-                  auto j = stage_2_ring_buffer[_k];
-                  j["some field"] = "some value";
-                  j["some list"] = {'a', 'b', 'c'};
-                  j["some dict"] = { {"thing1", 1}, {"thing2", 3.1411111} };
-                  if (j["timestamp"] > 1616381017606) {
-                      j["is_first"] = false;
-                  } else {
-                      j["is_first"] = true;
-                      j.erase("flags");
-                  }
+                                           /*size_t count;
+                                           std::string s[stage_1_stride];
 
-                  // search the string
-                  if (j.find("dest_port") != j.end()){
-                      if (j["dest_port"] == "80") {
-                          j["is_http_dest"] = true;
-                      } else {
-                          j["is_http_dest"] = false;
-                      }
-                  }
-                  stage_2_ring_buffer[_k] = j;
-              }
-            }).name("Stage2 for_each_index");
+                                           count = stage_1_queue.try_dequeue_bulk(&s[0], stage_1_stride);
+                                           if (count == 0) { return; }
+                                           json j[count];
+
+                                           for (int k = 0; k < count; k++) {
+                                               j[k] = json::parse(s[k]);
+                                           }
+                                           success = stage_2_queue.try_enqueue_bulk(&j[0], count);
+                                           */
+                                       }).name("Stage_1 for_each_index");
+
+        stage_2_subflow.for_each_index(std::ref(stage_2_start), std::ref(stage_2_count), stage_2_stride,
+                                       [&](auto x) {
+                                           std::stringstream sstream;
+
+                                           // Do some arbitrary JSON operations.
+                                           bool found;
+                                           for (int k = 0; k < stage_2_stride; k++) {
+                                               json j;
+                                               found = stage_2_queue.try_dequeue(j);
+                                               if (not found) { break; }
+
+                                               j["some field"] = "some value";
+                                               j["some list"] = {'a', 'b', 'c'};
+                                               j["some dict"] = {{"thing1", 1},
+                                                                 {"thing2", 3.1411111}};
+                                               if (j["timestamp"] > 1616381017606) {
+                                                   j["is_first"] = false;
+                                               } else {
+                                                   j["is_first"] = true;
+                                                   j.erase("flags");
+                                               }
+
+                                               // search the string
+                                               if (j.find("dest_port") != j.end()) {
+                                                   if (j["dest_port"] == "80") {
+                                                       j["is_http_dest"] = true;
+                                                   } else {
+                                                       j["is_http_dest"] = false;
+                                                   }
+                                               }
+                                               stage_3_queue.enqueue(j);
+                                           }
+                                       }).name("Stage2 for_each_index");
         stage_2_subflow.name("Work phase 2");
 
         std::ofstream file;
@@ -398,17 +430,12 @@ int main(int argc, char **argv) {
 
             int count = 0;
             while (running) {
-                if (not stage_1_ring_buffer.full()) {
-                    stage_1_ring_buffer.push(json_data);
-                    count++;
+                stage_1_queue.enqueue(json_data);
+                count++;
 
-                    if (count > rate_per_sec) {
-                        std::this_thread::sleep_for(std::chrono::seconds(1));
-                        count = 0;
-                    }
-                } else {
-                    std::cerr << "WARN: stage_1 buffer is full, throttling" << std::endl;
-                    std::this_thread::sleep_for(std::chrono::seconds(2));
+                if (count > rate_per_sec) {
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                    count = 0;
                 }
             }
 
@@ -419,19 +446,30 @@ int main(int argc, char **argv) {
     // Stage one grabs available available work from the stage 1 buffer, and runs subflow 1 on it, which
     // pre-processes the json string into a 'json' object and puts it on buffer 2
     tf::Task stage_1 = taskflow.emplace([&]() {
-        int src_start, n;
-        std::tie(src_start, n) = stage_1_ring_buffer.get_working_range();
-        index_1_start = src_start;
-        index_1_end = src_start + n; // End here is before taking the ring size mudulus
+        // Do any stage specific work/tuning here.
+        int a = 0, b = 1;
+        if (stage_1_running.compare_exchange_strong(a, b)) {
+            std::cout << "Starting stage_1 async worker" << std::endl;
 
-        if (n != 0) {
-            int dst_start;
-            dst_start = stage_2_ring_buffer.reserve_working_range(n);
-            index_2_start = dst_start;
-            index_2_end = dst_start + n;
+            executor.async([&]() {
+                size_t count;
+                // try to allocate memory
+                std::string s[100];
+                json j[100];
 
-            executor.run(stage_1_subflow).get();
-            stage_1_ring_buffer.pop_n(n);
+                while (running) {
+                    count = stage_1_queue.try_dequeue_bulk(&s[0], 100);
+
+                    for (int i = 0; i < count; ++i) {
+                        j[i] = json::parse(s[i]);
+                    }
+
+                    if (count > 0) {
+                        stage_2_queue.enqueue_bulk(&j[0], count);
+                    }
+                }
+                stage_1_running.compare_exchange_strong(b, a);
+            });
         }
     }).name("stage_1");
 
@@ -439,38 +477,98 @@ int main(int argc, char **argv) {
     tf::Task stage_1_return = taskflow.emplace([&]() {
         if (not running) { return 2; }
 
-        if (not stage_2_ring_buffer.empty()) { return 1; }
+        if (stage_2_queue.size_approx() > 0) { return 1; }
 
         return 0;
     }).name("stage_1_cond");
 
     tf::Task stage_2 = taskflow.emplace([&]() {
-        executor.run(stage_2_subflow).get();
+        int a = 0, b = 1;
+        if (stage_2_running.compare_exchange_strong(a, b)) {
+            std::cout << "Starting stage_2 async worker" << std::endl;
 
-        for (int i = index_2_start; i < index_2_end; i++) {
-            std::stringstream sstream;
-            sstream << stage_2_ring_buffer[i % stage_2_ring_buffer.end()];
+            executor.async([&]() {
+                size_t count;
+                json j[100];
 
-            int slen = sstream.str().size();
-            char *cstr = new char[slen + 1]{0};
-            std::strcpy(cstr, sstream.str().c_str());
-            int sent = send(_sock, cstr, slen + 1, 0);
+                while (running) {
+                    count = stage_2_queue.try_dequeue_bulk(&j[0], 100);
+
+                    for (int i = 0; i < count; i++) {
+                        j[i]["some field"] = "some value";
+                        j[i]["some list"] = {'a', 'b', 'c'};
+                        j[i]["some dict"] = {{"thing1", 1},
+                                             {"thing2", 3.1411111}};
+                        if (j[i]["timestamp"] > 1616381017606) {
+                            j[i]["is_first"] = false;
+                        } else {
+                            j[i]["is_first"] = true;
+                            j[i].erase("flags");
+                        }
+
+                        // search the string
+                        if (j[i].find("dest_port") != j[i].end()) {
+                            if (j[i]["dest_port"] == "80") {
+                                j[i]["is_http_dest"] = true;
+                            } else {
+                                j[i]["is_http_dest"] = false;
+                            }
+                        }
+                    }
+
+                    if (count > 0) {
+                        stage_3_queue.enqueue_bulk(&j[0], count);
+                    }
+                }
+                stage_2_running.compare_exchange_strong(b, a);
+            });
         }
-        processed += (index_2_end - index_2_start);
-        stage_2_ring_buffer.pop_n(index_2_end - index_2_start);
     }).name("stage 2");
 
-    tf::Task stage_2_return = taskflow.emplace([]() {
-        if (std::rand() % 2) { return 1; }
+    tf::Task stage_2_return = taskflow.emplace([&]() {
+        if (not running) { return 2; }
+
+        if (stage_3_queue.size_approx() > 0) { return 1; }
+
         return 0;
     }).name("stage_2_cond");
 
-    tf::Task stage_3 = taskflow.emplace([]() {
-        // Do some other task
+    tf::Task stage_3 = taskflow.emplace([&]() {
+        int a = 0, b = 1;
+        if (stage_3_running.compare_exchange_strong(a, b)) {
+            std::cout << "Starting stage_3 async worker" << std::endl;
+
+            executor.async([&]() {
+                int slen, sent;
+                char *cstr;
+
+                size_t count;
+                json j[100];
+
+                while (running) {
+                    count = stage_3_queue.try_dequeue_bulk(&j[0], 100);
+
+                    for (int i = 0; i < count; i++) {
+                        std::stringstream sstream;
+                        sstream << j[i];
+
+                        slen = sstream.str().size();
+                        cstr = new char[slen + 1]{0};
+
+                        std::strcpy(cstr, sstream.str().c_str());
+                        //sent = send(_sock, cstr, slen + 1, 0);
+
+                        delete cstr;
+                        processed += 1;
+                    }
+                }
+                stage_3_running.compare_exchange_strong(b, a);
+            });
+        }
     }).name("stage_3");
 
-    tf::Task stage_3_return = taskflow.emplace([](){
-       return 0;
+    tf::Task stage_3_return = taskflow.emplace([]() {
+        return 0;
     }).name("stage_3_cond");
 
     tf::Task stop = taskflow.emplace([&]() {
@@ -497,10 +595,11 @@ int main(int argc, char **argv) {
     file.close();
 
     executor.run(taskflow).wait();
-    std::cout << "\n" << std::flush;
 
+    std::cout << "\n" << std::flush;
     std::cout << "Joining metrics thread" << std::endl;
     throughput_compute_thread.join();
+
     std::cout << "Joining timeout thread" << std::endl;
     timeout_thread.join();
 
