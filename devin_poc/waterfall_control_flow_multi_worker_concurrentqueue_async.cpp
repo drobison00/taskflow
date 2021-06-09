@@ -16,7 +16,7 @@
 #include <iostream>
 #include <string>
 
-#include <concurrentqueue.h>
+#include <blockingconcurrentqueue.h>
 
 #include <nlohmann/json.hpp>
 #include <taskflow/taskflow.hpp>  // Taskflow is header-only
@@ -24,129 +24,6 @@
 
 using namespace std::chrono;
 using json = nlohmann::json;
-
-/** template <class T>
-class ChunkedRingBuffer {
-public:
-    ChunkedRingBuffer() : buffer_size{2<<21}, chunk_size{2<<15},
-    capacity{2<<21}, current_size{0}, trailing_index{0}, leading_index{0} {
-        buffer.reserve();
-    }
-
-    ChunkedRingBuffer(uint32_t size, uint32_t chunk_size) : buffer_size{size}, chunk_size{chunk_size},
-    capacity{size}, current_size{0}, trailing_index{0}, leading_index{0} {
-        assert(buffer_size > chunk_size);
-        assert(buffer_size % chunk_size == 0);
-        buffer.reserve(size);
-    }
-
-    void push(const T& value) {
-        if (capacity == 0) {
-            // Maybe add some kind of soft reject for throttling
-            throw std::out_of_range("Attempted push to full buffer.");
-        }
-
-        capacity -= 1;
-        current_size = buffer_size - capacity;
-
-        buffer[leading_index++] = value;
-        leading_index = leading_index % buffer_size;
-    }
-
-    void push(T& value) {
-        if (capacity == 0) {
-            throw std::out_of_range("Attempted push to full buffer.");
-        }
-
-        capacity -= 1;
-        current_size = buffer_size - capacity;
-
-        buffer[leading_index++] = value;
-        leading_index = leading_index % buffer_size;
-    }
-
-    void pop() {
-        if (capacity == buffer_size) {
-            throw std::out_of_range("Attempted to call pop empty buffer.");
-        }
-
-        trailing_index = (trailing_index + 1) % buffer_size;
-        capacity += 1;
-        current_size -= 1;
-    }
-
-    void pop_n(int n) {
-        if (n > current_size) {
-            throw std::out_of_range("Attempt to pop 'n' items exceeds what is in the buffer.");
-        }
-
-        trailing_index = (trailing_index + n) % buffer_size;
-        capacity += n;
-        current_size -= n;
-    }
-
-    uint32_t end() {
-        return buffer_size;
-    }
-
-    bool empty() {
-        return (current_size == 0);
-    }
-
-    bool full() {
-        return (capacity == 0);
-    }
-
-    uint32_t size() {
-        return current_size;
-    }
-
-    // Reserve the next chunk in the buffer for writing
-    uint32_t reserve_chunk() {
-        auto range_start = leading_index;
-        leading_index = (leading_index + n) % buffer_size;
-        capacity -= n;
-        current_size += n;
-
-        return range_start;
-    }
-
-    bool chunk_ready() {
-        return (leading_index - trailing_index >= chunk_size);
-    }
-
-    std::tuple<uint32_t, uint32_t> get_next_chunk() {
-        // return the current active chunk
-        if ()
-        auto chunk_size = trailing_index % chunk_size;
-        auto chunk_start = trailing_index % chunk_size;
-
-        return std::make_pair(chunk_start, chunk_size);
-    }
-
-    T& operator[](uint32_t idx) {
-        // TODO: check if were in a good range
-        return buffer[idx];
-    };
-
-    const T& operator[](uint32_t idx) const {
-        // TODO: check if were in a good range
-        return buffer[idx];
-    };
-
-private:
-    std::atomic<uint32_t> leading_index;
-    std::atomic<uint32_t> trailing_index;
-
-    const uint32_t chunk_size;
-    const uint32_t buffer_size;
-
-    uint32_t capacity;
-    uint32_t current_size;
-
-    std::vector<T> buffer;
-}; */
-
 
 // Ideas: Cascading async TaskFlows (modules)
 // Each module is launched by its parent using some batch size and fills it's child queues.
@@ -173,16 +50,16 @@ int main(int argc, char **argv) {
     uint32_t buffer_size = 2 << 21;
     uint32_t chunk_size = 2 << 15;
 
-    moodycamel::ConcurrentQueue <std::string> stage_1_queue;
-    moodycamel::ConcurrentQueue <json> stage_2_queue;
-    moodycamel::ConcurrentQueue <json> stage_3_queue;
-    moodycamel::ConcurrentQueue <json> stage_1_remote_queue;
+    moodycamel::BlockingConcurrentQueue <std::string> stage_1_queue;
+    moodycamel::BlockingConcurrentQueue <json> stage_2_queue;
+    moodycamel::BlockingConcurrentQueue <json> stage_3_queue;
+    moodycamel::BlockingConcurrentQueue <json> stage_1_remote_queue;
 
     int stage_1_count = 0;
     int stage_1_start = 0;
     int stage_2_count = 0;
     int stage_2_start = 0;
-    int stage_1_stride = 10;
+    int stage_1_stride = 100;
     int stage_2_stride = 1;
 
     std::srand(std::time(nullptr));
@@ -356,7 +233,7 @@ int main(int argc, char **argv) {
 
         stage_1_subflow.name("Work phase 1");
 
-        stage_2_subflow.for_each_index(std::ref(stage_2_start), std::ref(stage_2_count), stage_2_stride,
+        stage_2_subflow.for_each_index(std::ref(stage_2_start), std::ref(stage_2_count), std::ref(stage_2_stride),
                                        [&](auto x) {
                                            std::stringstream sstream;
 
@@ -428,39 +305,37 @@ int main(int argc, char **argv) {
     tf::Task stage_1 = taskflow.emplace([&]() {
         // Do any stage specific work/tuning here.
         int a = 0, b = 1;
-        static std::string s[1000];
+        static std::string s[10000];
         static json j[1000];
 
         if (stage_1_running.compare_exchange_strong(a, b)) {
             std::cout << "Starting stage_1 async worker" << std::endl;
-            stage_1_subflow.for_each_index(std::ref(stage_1_start), std::ref(stage_1_count), stage_1_stride,
+            stage_1_subflow.for_each_index(std::ref(stage_1_start), std::ref(stage_1_count), std::ref(stage_1_stride),
                                            [&](int x) {
-                                               j = json::parse(s);
-                                               stage_2_queue.enqueue(j);
+                                               for (int i = x; i < x + stage_1_stride && i < stage_1_count; i++) {
+                                                   auto k = i % 1000;
+                                                   j[k] = json::parse(s[i]);
+                                               }
                                            }).name("Stage_1 for_each_index");
-
 
             executor.async([&]() {
                 size_t count;
                 // try to allocate memory
 
                 while (running) {
-                    count = stage_1_queue.try_dequeue_bulk(&s[0], 1000);
-                    stage_1_start = 0;
-                    stage_1_count = count;
+                    count = stage_1_queue.wait_dequeue_bulk_timed(&s[0], 10000,
+                                                                  std::chrono::milliseconds(10));
 
-                    if (count > 0) {
-                        executor.run(stage_1_subflow).get();
-                    }
-                    /*
-                    for (int i = 0; i < count; ++i) {
-                        j[i] = json::parse(s[i]);
-                    }
+                    for (int i = 0; i < count; i += 1000) {
+                        stage_1_start = i;
+                        auto batch_size = std::min<int>(1000, count - i);
+                        stage_1_count = i + batch_size;
 
-                    if (count > 0) {
-                        stage_2_queue.enqueue_bulk(&j[0], count);
+                        if (batch_size > 0) {
+                            executor.run(stage_1_subflow).get();
+                            stage_2_queue.enqueue_bulk(&j[0], batch_size);
+                        }
                     }
-                    */
                 }
                 stage_1_running.compare_exchange_strong(b, a);
             });
@@ -478,15 +353,16 @@ int main(int argc, char **argv) {
 
     tf::Task stage_2 = taskflow.emplace([&]() {
         int a = 0, b = 1;
+        static json j[1000];
+
         if (stage_2_running.compare_exchange_strong(a, b)) {
             std::cout << "Starting stage_2 async worker" << std::endl;
 
             executor.async([&]() {
                 size_t count;
-                json j[1000];
-
                 while (running) {
-                    count = stage_2_queue.try_dequeue_bulk(&j[0], 1000);
+                    count = stage_2_queue.wait_dequeue_bulk_timed(&j[0], 1000,
+                                                                  std::chrono::milliseconds(10));
 
                     for (int i = 0; i < count; i++) {
                         j[i]["some field"] = "some value";
@@ -529,6 +405,8 @@ int main(int argc, char **argv) {
 
     tf::Task stage_3 = taskflow.emplace([&]() {
         int a = 0, b = 1;
+        static json j[1000];
+
         if (stage_3_running.compare_exchange_strong(a, b)) {
             std::cout << "Starting stage_3 async worker" << std::endl;
 
@@ -537,10 +415,9 @@ int main(int argc, char **argv) {
                 char *cstr;
 
                 size_t count;
-                json j[1000];
-
                 while (running) {
-                    count = stage_3_queue.try_dequeue_bulk(&j[0], 1000);
+                    count = stage_3_queue.wait_dequeue_bulk_timed(&j[0], 1000,
+                                                                  std::chrono::milliseconds(10));
 
                     for (int i = 0; i < count; i++) {
                         std::stringstream sstream;
