@@ -216,7 +216,7 @@ void LinearPipeline::add_stage(OutputType (*work_routine)(InputType)) {
 
             std::this_thread::sleep_for(std::chrono::seconds(sleep_time));
         }
-        sleep_time = 5;
+        sleep_time = 1;
     });
 
     id_to_task_map[index] = stage_task;
@@ -253,7 +253,7 @@ void LinearPipeline::set_source(SourceAdapter<SourceType, OutputType> &adapter) 
                       << " tasks" << std::endl;
             std::this_thread::sleep_for(std::chrono::seconds(sleep_time));
         }
-        sleep_time = 5;
+        sleep_time = 1;
     }).name("source");
 
     id_to_task_map[index] = source_task;
