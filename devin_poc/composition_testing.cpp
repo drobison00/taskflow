@@ -37,17 +37,18 @@ int main(int argc, char **argv) {
     tf::Executor executor(workers);
 
     LinearPipeline lp(executor);
-    FileSourceAdapter sa("devin_poc/without_data_len.json", rate_per_sec);
+    //FileSourceAdapter fsa("devin_poc/without_data_len.json", rate_per_sec);
 
-    lp.set_source(sa);
-    lp.add_stage(work_routine_string_to_json);
-    lp.add_stage(work_routine_random_work_on_json_object);
-    lp.add_stage(work_routine_random_work_on_json_object);
-    lp.add_stage(work_routine_random_work_on_json_object);
-    lp.add_stage(work_routine_random_work_on_json_object);
-    lp.add_stage(work_routine_random_work_on_json_object);
-    lp.add_stage(work_routine_random_work_on_json_object);
-    lp.add_stage(work_routine_random_work_on_json_object);
+    lp.set_source<std::fstream, std::string>(
+            "devin_poc/without_data_len.json", rate_per_sec);
+    lp.add_stage(std::function<json(std::string)>(work_routine_string_to_json));
+    lp.add_stage(std::function<json(json)>(work_routine_random_work_on_json_object));
+    lp.add_stage(std::function<json(json)>(work_routine_random_work_on_json_object));
+    lp.add_stage(std::function<json(json)>(work_routine_random_work_on_json_object));
+    lp.add_stage(std::function<json(json)>(work_routine_random_work_on_json_object));
+    lp.add_stage(std::function<json(json)>(work_routine_random_work_on_json_object));
+    lp.add_stage(std::function<json(json)>(work_routine_random_work_on_json_object));
+    lp.add_stage(std::function<json(json)>(work_routine_random_work_on_json_object));
     lp.add_conditional_stage(work_routine_conditional_jump_to_start);
     lp.start();
 
