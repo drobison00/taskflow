@@ -40,23 +40,16 @@ public:
     }
 
     unsigned int queue_size() {
-        // TODO: ?
-        return 0;
+        return output->size_approx();
     }
 };
 
 // Specialize for specific input/output cases
 template<>
 void SourceAdapter<std::fstream, std::string>::pump() {
-    static unsigned int count = 0;
     //std::string data;
     //std::getline(source, data);
     output->enqueue(data_debug);
-    count++;
-    if (count > max_read_rate) {
-        std::this_thread::sleep_for(std::chrono::seconds(1));
-        count = 0;
-    }
     processed += 1;
 };
 
@@ -190,19 +183,23 @@ json work_routine_random_work_on_json_object(json j) {
 }
 
 struct TaskStats {
+    unsigned int stage_type;
+
     unsigned int last_processed = 0 ;
-    unsigned int last_in_queue = 0;
+    unsigned int last_queue_size = 0;
 
     double avg_throughput = 0.0;
+    double avg_delta_throughput = 0.0;
     double avg_queue_size = 0.0;
+    double avg_delta_queue_size = 0.0;
     double avg_time_between_visits = 0.0;
 
     std::chrono::time_point<std::chrono::steady_clock> last_visited;
 };
 
 class LinearPipeline {
+    enum StageType { source, intermediate, sink, conditional };
 public:
-    long int processed = 0;
     unsigned int stages = 0;
     bool print_stats = false;
 
@@ -244,9 +241,30 @@ public:
                         std::chrono::duration<double> elapsed = cur_time - start_time;
 
                         sstream.str("");
-                        sstream << "Processed: ";
+                        sstream << "Throughput msg/sec: ";
                         for (auto i = 0; i < this->task_stats.size(); i++) {
-                            sstream << "q." << i << " : " << std::setw(10) << this->task_stats[i]->last_processed << " ";
+                            switch (this->task_stats[i]->stage_type) {
+                                case StageType::conditional:
+                                {
+                                    sstream << "[cond], ";
+                                    break;
+                                }
+                                case StageType::source:
+                                {
+                                    sstream << "[pumped]" << " => "
+                                            << std::setw(10) << std::setprecision(0) << std::fixed <<
+                                            this->task_stats[i]->avg_throughput << "(" <<
+                                            this->task_stats[i]->avg_queue_size << "), ";
+                                    break;
+                                }
+
+                                default: {
+                                    sstream << "[q." << i << "] => "
+                                            << std::setw(8) << std::setprecision(0) << std::fixed <<
+                                            this->task_stats[i]->avg_throughput << ", ";
+                                }
+                            }
+
                         }
                         sstream << " runtime: " << std::setw(8) << elapsed.count() << " sec\r";
                         std::cout << sstream.str() << std::flush;
@@ -276,24 +294,40 @@ public:
     template<class InputType, class SinkType>
     void set_sink(std::string connection_string);
 
-    void update_task_stats(unsigned int index, unsigned int processed, unsigned int in_queue) {
+    void update_task_stats(unsigned int index, unsigned int processed, unsigned int queue_size) {
         auto cur_time = std::chrono::steady_clock::now();
         auto last_time = task_stats[index]->last_visited;
         auto last_processed = task_stats[index]->last_processed;
-        auto last_in_queue = task_stats[index]->last_in_queue;
+        auto last_queue_size = task_stats[index]->last_queue_size;
+        auto last_avg_throughput = task_stats[index]->avg_throughput;
+        auto last_avg_queue_size = task_stats[index]->avg_queue_size;
+
         auto delta_proc = processed - last_processed;
-        auto delta_in_queue = in_queue - last_in_queue;
+        auto delta_queue_size = last_queue_size - queue_size;
         std::chrono::duration<double> delta_visit = cur_time - last_time;
+
+        auto avg_throughput = 0.99 * last_avg_throughput + 0.01 * delta_proc / delta_visit.count();
+        auto avg_queue_size = 0.99 * last_avg_queue_size + 0.01 * queue_size;
+
+        auto delta_avg_throughput = last_avg_throughput - avg_throughput;
+        auto delta_avg_queue_size = last_avg_queue_size - avg_queue_size;
+
+        auto avg_delta_throughput = 0.99 * last_avg_throughput + 0.01 * delta_avg_throughput;
+        auto avg_delta_queue_size = 0.99 * last_avg_queue_size + 0.01 * delta_avg_queue_size;
+
 
         task_stats[index]->last_visited = std::chrono::steady_clock::now();
         task_stats[index]->last_processed = processed;
-        task_stats[index]->last_in_queue = in_queue;
+        task_stats[index]->last_queue_size = queue_size;
+
+        task_stats[index]->avg_throughput = avg_throughput;
+        task_stats[index]->avg_delta_throughput = avg_delta_throughput;
+        task_stats[index]->avg_queue_size = avg_queue_size;
+        task_stats[index]->avg_delta_queue_size = avg_delta_queue_size;
 
         task_stats[index]->avg_time_between_visits =
                 0.99 * task_stats[index]->avg_time_between_visits + 0.01 * delta_visit.count();
 
-        task_stats[index]->avg_throughput =
-                0.99 * task_stats[index]->avg_throughput + 0.01 * delta_proc * delta_visit.count();
     }
 };
 
@@ -303,7 +337,10 @@ void LinearPipeline::add_conditional_stage(unsigned int (*cond_test)(LinearPipel
     std::atomic<unsigned int> *run_flag = new std::atomic<unsigned int>(0);
     auto index = stage_running_flags.size();
     stage_running_flags.push_back(run_flag);
+
+
     task_stats.push_back(std::unique_ptr<TaskStats>(new TaskStats()));
+    task_stats[index]->stage_type = StageType::conditional;
     std::cout << "Adding conditional at " << index << std::endl;
 
     tf::Task conditional = pipeline.emplace([this, cond_test]() {
@@ -333,6 +370,7 @@ void LinearPipeline::add_stage(std::function<OutputType(InputType)> work_routine
     edges.push_back(adapter->get_output_edge());
     task_stats.push_back(std::unique_ptr<TaskStats>(new TaskStats()));
     task_stats[index]->last_visited = std::chrono::steady_clock::now();
+    task_stats[index]->stage_type = StageType::intermediate;
 
     tf::Task stage_task = pipeline.emplace([this, index, adapter]() {
         unsigned int a = 0, b = 1; // TODO should be class level enums
@@ -340,7 +378,9 @@ void LinearPipeline::add_stage(std::function<OutputType(InputType)> work_routine
         if ((this->stage_running_flags[index])->compare_exchange_strong(a, b)) {
             std::cout << "Initializing stage " << index << " task." << std::endl;
             service_executor.async([&]() {
-                while (this->pipeline_running == 1) { adapter->pump(); }
+                while (this->pipeline_running == 1) {
+                    adapter->pump();
+                }
                 this->stage_running_flags[index]->compare_exchange_strong(b, a);
             });
         }
@@ -366,6 +406,7 @@ void LinearPipeline::set_source(std::string connection_string, unsigned int max_
     edges.push_back(adapter->get_output_edge());
     task_stats.push_back(std::unique_ptr<TaskStats>(new TaskStats()));
     task_stats[index]->last_visited = std::chrono::steady_clock::now();
+    task_stats[index]->stage_type = StageType::source;
 
     std::cout << "Adding pipeline source" << std::endl;
     tf::Task source_task = pipeline.emplace([this, adapter, index]() {
@@ -376,20 +417,20 @@ void LinearPipeline::set_source(std::string connection_string, unsigned int max_
             adapter->init();
 
             service_executor.async([&]() {
-                while (this->pipeline_running == 1) { adapter->pump(); }
+                while (this->pipeline_running == 1) {
+                    if (adapter->processed > adapter->max_read_rate) {
+                        if (this->task_stats[index]->avg_queue_size < adapter->max_read_rate) {
+                            adapter->pump();
+                        }
+                    } else {
+                        adapter->pump();
+                    }
+                }
                 this->stage_running_flags[index]->compare_exchange_strong(b, a);
             });
         }
 
         update_task_stats(index, adapter->processed, adapter->queue_size());
-        /*
-        if (sleep_time > 0) {
-            std::cout << "[Business Logic] Data source has pumped " << adapter->processed
-                      << " tasks" << std::endl;
-            std::this_thread::sleep_for(std::chrono::seconds(sleep_time));
-        }
-        sleep_time = 1;
-        */
     }).name("source");
 
     id_to_task_map[index] = source_task;
@@ -412,6 +453,7 @@ void LinearPipeline::set_sink(std::string connection_string) {
     stage_adapters.push_back(adapter);
     task_stats.push_back(std::unique_ptr<TaskStats>(new TaskStats()));
     task_stats[index]->last_visited = std::chrono::steady_clock::now();
+    task_stats[index]->stage_type = StageType::sink;
 
     std::cout << "Adding pipeline sink" << std::endl;
     tf::Task sink_task = pipeline.emplace([this, adapter, index]() {
