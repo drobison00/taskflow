@@ -25,10 +25,6 @@ void test_func_1() {
     std::cout << "test" << std::endl;
 }
 
-// Ideas: Cascading async TaskFlows (modules)
-// Each module is launched by its parent using some batch size and fills it's child queues.
-//
-// Waterfall design that continually back-fills, which each phase executing if it has enough items otherwise falling back
 int main(int argc, char **argv) {
     unsigned int rate_per_sec = 1;
     if (argc > 1) {
@@ -40,7 +36,6 @@ int main(int argc, char **argv) {
     tf::Executor executor(workers);
 
     LinearPipeline lp(executor, true);
-    //FileSourceAdapter fsa("devin_poc/without_data_len.json", rate_per_sec);
 
     lp.set_source<std::fstream, std::string>("devin_poc/without_data_len.json", rate_per_sec);
     lp.add_stage(std::function<json(std::string)>(work_routine_string_to_json));
