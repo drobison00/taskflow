@@ -31,24 +31,24 @@ void test_func_1() {
 // Waterfall design that continually back-fills, which each phase executing if it has enough items otherwise falling back
 int main(int argc, char **argv) {
     unsigned int rate_per_sec = 1;
+    if (argc > 1) {
+        rate_per_sec = std::stoi(argv[1]);
+    }
     unsigned int timeout = 300;
     int workers = 16;
 
     tf::Executor executor(workers);
 
-    LinearPipeline lp(executor);
+    LinearPipeline lp(executor, true);
     //FileSourceAdapter fsa("devin_poc/without_data_len.json", rate_per_sec);
 
-    lp.set_source<std::fstream, std::string>(
-            "devin_poc/without_data_len.json", rate_per_sec);
+    lp.set_source<std::fstream, std::string>("devin_poc/without_data_len.json", rate_per_sec);
     lp.add_stage(std::function<json(std::string)>(work_routine_string_to_json));
     lp.add_stage(std::function<json(json)>(work_routine_random_work_on_json_object));
     lp.add_stage(std::function<json(json)>(work_routine_random_work_on_json_object));
     lp.add_stage(std::function<json(json)>(work_routine_random_work_on_json_object));
     lp.add_stage(std::function<json(json)>(work_routine_random_work_on_json_object));
-    lp.add_stage(std::function<json(json)>(work_routine_random_work_on_json_object));
-    lp.add_stage(std::function<json(json)>(work_routine_random_work_on_json_object));
-    lp.add_stage(std::function<json(json)>(work_routine_random_work_on_json_object));
+    lp.set_sink<json, SinkThrowAway<json>>("");
     lp.add_conditional_stage(work_routine_conditional_jump_to_start);
     lp.start();
 
