@@ -15,6 +15,9 @@ using namespace nlohmann;
 
 class LinearPipeline;
 
+template <class InputType, class OutputType>
+class LinearLinkInfo;
+
 template<class SourceType, class OutputType>
 class SourceAdapter;
 
@@ -290,6 +293,12 @@ class RandomTrigWorkAdapter : public StageAdapter<InputType, OutputType> {
 public:
     static constexpr double MYPI = 3.14159265;
 
+    RandomTrigWorkAdapter() : StageAdapter<InputType, OutputType>(map) {};
+
+    static RandomTrigWorkAdapter *create() {
+        return new RandomTrigWorkAdapter<InputType, OutputType>();
+    }
+
     static double trig_work() {
         int how_many = std::rand() % 1000000;
         double random_angle_rads = MYPI * ((double) std::rand() / (double) RAND_MAX);
@@ -308,26 +317,27 @@ public:
         trig_work();
         return data;
     }
-
-    RandomTrigWorkAdapter() : StageAdapter<InputType, OutputType>(map) {};
 };
 
 
 template<class InputType, class OutputType>
 class ReplicationSubDivideWorkAdapter : public StageAdapter<InputType, OutputType> {
 public:
-
     unsigned int buffer_sz;
-    std::shared_ptr<OutputType> buffer_out;
+    std::shared_ptr<OutputType[]> buffer_out;
+
+    static ReplicationSubDivideWorkAdapter *create(unsigned int replica_count = 10) {
+        return new ReplicationSubDivideWorkAdapter<InputType, OutputType>(replica_count);
+    }
 
     ReplicationSubDivideWorkAdapter(unsigned int replica_count = 10) :
         buffer_sz{replica_count}, StageAdapter<InputType, OutputType>() {
-        buffer_out = std::shared_ptr<OutputType>(new OutputType[replica_count]);
+        buffer_out = std::shared_ptr<OutputType[]>(new OutputType[replica_count]);
     };
 
     void map(InputType data) {
         for (int i = 0; i < buffer_sz; i++) {
-            *(buffer_out.get() + i) = data;
+            buffer_out[i] = data;
         }
     }
 
@@ -359,6 +369,10 @@ class BatchingWorkAdapter : public StageAdapter<DataType, std::shared_ptr<BatchO
 public:
     unsigned int timeout;
     unsigned int batch_size;
+
+    static BatchingWorkAdapter *create(unsigned int batch_size = 10, unsigned int timeout = 10) {
+        return new BatchingWorkAdapter<DataType>(batch_size, timeout);
+    }
 
     BatchingWorkAdapter(unsigned int batch_size = 10, unsigned int timeout = 10) :
             batch_size{batch_size}, timeout{timeout},
@@ -420,6 +434,10 @@ json map_random_work_on_json_object(json j) {
 
     return j;
 }
+
+bool filter_random_drop(std::string d) {
+    return (std::rand() % 2 == 0);
+};
 
 
 struct TaskStats {
@@ -553,23 +571,35 @@ public:
     }
 
     template<class InputType, class OutputType>
-    LinearPipeline& add_stage(StageAdapter<InputType, OutputType> *adapter);
+    LinearLinkInfo<InputType, OutputType> add_stage(StageAdapter<InputType, OutputType> *adapter);
 
     template<class InputType, class OutputType>
-    LinearPipeline& add_stage(std::function<OutputType(InputType)> map);
+    LinearLinkInfo<InputType, OutputType> add_stage(std::function<OutputType(InputType)> map);
 
     template<class InputType, class OutputType>
-    LinearPipeline& add_stage(OutputType(*map)(InputType)) {
+    LinearLinkInfo<InputType, OutputType> add_stage(OutputType(*map)(InputType)) {
         return add_stage(std::function(map));
+    };
+
+    // Redundant, but for experimenting with terminology.
+    template<class InputType, class OutputType>
+    LinearLinkInfo<InputType, OutputType> map(OutputType(*map)(InputType)) {
+        return add_stage(std::function(map));
+    };
+
+    // Redundant, but for experimenting with terminology.
+    template<class DataType>
+    LinearLinkInfo<DataType, DataType>& filter(bool(*filter)(DataType)) {
+        return add_stage(new FilterAdapter<DataType>(std::function<bool(DataType)>(filter)));
     };
 
     LinearPipeline& add_conditional_stage(unsigned int (*cond_test)(LinearPipeline *));
 
     template<class SourceType, class OutputType>
-    LinearPipeline& set_source(std::string connection_string, unsigned int max_read_rate);
+    LinearLinkInfo<SourceType, OutputType> set_source(std::string connection_string, unsigned int max_read_rate);
 
     template<class InputType>
-    LinearPipeline& set_sink(SinkAdapter<InputType> *adapter);
+    LinearLinkInfo<InputType, InputType> set_sink(SinkAdapter<InputType> *adapter);
 
     void update_task_stats(unsigned int index, unsigned int processed, unsigned int queue_size) {
         auto cur_time = std::chrono::steady_clock::now();
@@ -633,7 +663,7 @@ LinearPipeline& LinearPipeline::add_conditional_stage(unsigned int (*cond_test)(
 }
 
 template<class InputType, class OutputType>
-LinearPipeline& LinearPipeline::add_stage(StageAdapter<InputType, OutputType> *stage_adapter) {
+LinearLinkInfo<InputType, OutputType> LinearPipeline::add_stage(StageAdapter<InputType, OutputType> *stage_adapter) {
     std::atomic<unsigned int> *run_flag = new std::atomic<unsigned int>(0);
     auto index = stage_running_flags.size();
     stage_running_flags.push_back(run_flag);
@@ -671,11 +701,11 @@ LinearPipeline& LinearPipeline::add_stage(StageAdapter<InputType, OutputType> *s
     task_chain.push_back(stage_task);
     task_chain[index - 1].precede(stage_task);
 
-    return *this;
+    return LinearLinkInfo<InputType, OutputType>(*this);
 }
 
 template<class InputType, class OutputType>
-LinearPipeline& LinearPipeline::add_stage(std::function<OutputType(InputType)> map) {
+LinearLinkInfo<InputType, OutputType> LinearPipeline::add_stage(std::function<OutputType(InputType)> map) {
     std::atomic<unsigned int> *run_flag = new std::atomic<unsigned int>(0);
     auto index = stage_running_flags.size();
     stage_running_flags.push_back(run_flag);
@@ -713,11 +743,11 @@ LinearPipeline& LinearPipeline::add_stage(std::function<OutputType(InputType)> m
     task_chain.push_back(stage_task);
     task_chain[index - 1].precede(stage_task);
 
-    return *this;
+    return LinearLinkInfo<InputType, OutputType>(*this);
 }
 
 template<class SourceType, class OutputType>
-LinearPipeline& LinearPipeline::set_source(std::string connection_string, unsigned int max_read_rate) {
+LinearLinkInfo<SourceType, OutputType> LinearPipeline::set_source(std::string connection_string, unsigned int max_read_rate) {
     std::atomic<unsigned int> *run_flag = new std::atomic<unsigned int>(0);
     auto index = stage_running_flags.size();
     stage_running_flags.push_back(run_flag);
@@ -754,11 +784,11 @@ LinearPipeline& LinearPipeline::set_source(std::string connection_string, unsign
     task_chain.push_back(source_task);
     init.precede(source_task);
 
-    return *this;
+    return LinearLinkInfo<SourceType, OutputType>(*this);
 };
 
 template<class InputType>
-LinearPipeline& LinearPipeline::set_sink(SinkAdapter<InputType> *sink_adapter) {
+LinearLinkInfo<InputType, InputType> LinearPipeline::set_sink(SinkAdapter<InputType> *sink_adapter) {
     std::atomic<unsigned int> *run_flag = new std::atomic<unsigned int>(0);
     auto index = stage_running_flags.size();
     stage_running_flags.push_back(run_flag);
@@ -795,7 +825,50 @@ LinearPipeline& LinearPipeline::set_sink(SinkAdapter<InputType> *sink_adapter) {
     task_chain.push_back(sink_task);
     task_chain[index - 1].precede(sink_task);
 
-    return *this;
+    return LinearLinkInfo<InputType, InputType>(*this);
+};
+
+template <class InputType, class OutputType>
+class LinearLinkInfo {
+public:
+    LinearPipeline &lp;
+    //std::shared_ptr <BlockingConcurrentQueue<OutputType>> link_output;
+
+    LinearLinkInfo(LinearPipeline &lp) :
+        lp{lp} {
+    };
+
+    LinearLinkInfo<OutputType, OutputType> set_sink(SinkAdapter<OutputType> *adapter) {
+        return lp.set_sink(adapter);
+    }
+
+    template<class NextType>
+    LinearLinkInfo<OutputType, NextType> add_stage(StageAdapter<OutputType, NextType> *adapter){
+        return lp.add_stage(adapter);
+    };
+
+    template<class NextType>
+    LinearLinkInfo<OutputType, NextType> add_stage(std::function<NextType(OutputType)> map) {
+        return lp.add_stage(map);
+    };
+
+    template<class NextType>
+    LinearLinkInfo<OutputType, NextType> add_stage(OutputType(*map)(InputType)) {
+        return lp.add_stage(std::function(map));
+    };
+
+    template<class NextType>
+    LinearLinkInfo<OutputType, NextType> map(NextType(*map)(OutputType)) {
+        return lp.add_stage(std::function(map));
+    };
+
+    LinearLinkInfo<OutputType, OutputType> filter(bool(*filter)(OutputType)) {
+        return lp.add_stage(new FilterAdapter<OutputType>(std::function<bool(OutputType)>(filter)));
+    };
+
+    LinearPipeline& add_conditional_stage(unsigned int (*cond_test)(LinearPipeline *)) {
+        return lp.add_conditional_stage(cond_test);
+    };
 };
 
 unsigned int map_conditional_jump_to_start(LinearPipeline *lp) {
