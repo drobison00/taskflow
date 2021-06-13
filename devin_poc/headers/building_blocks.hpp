@@ -12,6 +12,18 @@
 using namespace moodycamel;
 using namespace nlohmann;
 
+
+class LinearPipeline;
+
+template<class SourceType, class OutputType>
+class SourceAdapter;
+
+template<class InputType>
+class SinkAdapter;
+
+template<class InputType, class OutputType>
+class StageAdapter;
+
 template<class DataType>
 class BatchObject {
 public:
@@ -27,7 +39,6 @@ public:
 };
 
 // Source Adapters
-
 template<class SourceType, class OutputType>
 class SourceAdapter {
 public:
@@ -156,7 +167,6 @@ public:
 
     virtual int pump() = 0;
 };
-
 
 template<class InputType, class OutputType>
 class StageAdapter : public StageAdapterBase {
@@ -427,6 +437,7 @@ struct TaskStats {
     std::chrono::time_point <std::chrono::steady_clock> last_visited;
 };
 
+
 class LinearPipeline {
     enum StageType {
         source, intermediate, sink, conditional
@@ -436,8 +447,7 @@ public:
     bool print_stats = false;
 
     std::atomic<unsigned int> pipeline_running = 0;
-    std::vector<std::atomic < unsigned int>*>
-    stage_running_flags;
+    std::vector <std::atomic <unsigned int>*> stage_running_flags;
     std::vector <std::shared_ptr<void>> stage_adapters;
     std::vector <std::shared_ptr<void>> edges;
     std::vector <std::unique_ptr<TaskStats>> task_stats;
@@ -448,8 +458,7 @@ public:
     tf::Taskflow pipeline;
     tf::Executor &service_executor;
 
-    ~LinearPipeline() {
-    };
+    ~LinearPipeline() {};
 
     LinearPipeline(tf::Executor &executor) : service_executor{executor} {
         init = pipeline.emplace([this]() {
@@ -513,7 +522,7 @@ public:
         });
     }
 
-    void start(unsigned int runtime = 0) {
+    LinearPipeline& start(unsigned int runtime = 0) {
         pipeline_running = 1;
 
         if (runtime > 0) {
@@ -524,37 +533,43 @@ public:
         }
 
         service_executor.run(pipeline).wait();
+
+        return *this;
     }
 
-    void stop() {
+    LinearPipeline& stop() {
         pipeline_running = 0;
+
+        return *this;
     }
 
-    void visualize(std::string filename) {
+    LinearPipeline& visualize(std::string filename) {
         std::ofstream file;
         file.open(filename);
         pipeline.dump(file);
         file.close();
+
+        return *this;
     }
 
     template<class InputType, class OutputType>
-    void add_stage(StageAdapter<InputType, OutputType> *adapter);
+    LinearPipeline& add_stage(StageAdapter<InputType, OutputType> *adapter);
 
     template<class InputType, class OutputType>
-    void add_stage(std::function<OutputType(InputType)> map);
+    LinearPipeline& add_stage(std::function<OutputType(InputType)> map);
 
     template<class InputType, class OutputType>
-    void add_stage(OutputType(*map)(InputType)) {
-        add_stage(std::function(map));
+    LinearPipeline& add_stage(OutputType(*map)(InputType)) {
+        return add_stage(std::function(map));
     };
 
-    void add_conditional_stage(unsigned int (*cond_test)(LinearPipeline *));
+    LinearPipeline& add_conditional_stage(unsigned int (*cond_test)(LinearPipeline *));
 
     template<class SourceType, class OutputType>
-    void set_source(std::string connection_string, unsigned int max_read_rate);
+    LinearPipeline& set_source(std::string connection_string, unsigned int max_read_rate);
 
     template<class InputType>
-    void set_sink(SinkAdapter<InputType> *adapter);
+    LinearPipeline& set_sink(SinkAdapter<InputType> *adapter);
 
     void update_task_stats(unsigned int index, unsigned int processed, unsigned int queue_size) {
         auto cur_time = std::chrono::steady_clock::now();
@@ -593,7 +608,7 @@ public:
     }
 };
 
-void LinearPipeline::add_conditional_stage(unsigned int (*cond_test)(LinearPipeline *)) {
+LinearPipeline& LinearPipeline::add_conditional_stage(unsigned int (*cond_test)(LinearPipeline *)) {
     // TODO: this is entirely ad-hoc right now. It exists only as a way to add the jump to start
     // conditional. Still thinking through the architecture requirements to generalize.
     std::atomic<unsigned int> *run_flag = new std::atomic<unsigned int>(0);
@@ -613,10 +628,12 @@ void LinearPipeline::add_conditional_stage(unsigned int (*cond_test)(LinearPipel
     task_chain.push_back(conditional);
     task_chain[index - 1].precede(conditional);
     conditional.precede(task_chain[0], this->end);
+
+    return *this;
 }
 
 template<class InputType, class OutputType>
-void LinearPipeline::add_stage(StageAdapter<InputType, OutputType> *stage_adapter) {
+LinearPipeline& LinearPipeline::add_stage(StageAdapter<InputType, OutputType> *stage_adapter) {
     std::atomic<unsigned int> *run_flag = new std::atomic<unsigned int>(0);
     auto index = stage_running_flags.size();
     stage_running_flags.push_back(run_flag);
@@ -653,10 +670,12 @@ void LinearPipeline::add_stage(StageAdapter<InputType, OutputType> *stage_adapte
     id_to_task_map[index] = stage_task;
     task_chain.push_back(stage_task);
     task_chain[index - 1].precede(stage_task);
+
+    return *this;
 }
 
 template<class InputType, class OutputType>
-void LinearPipeline::add_stage(std::function<OutputType(InputType)> map) {
+LinearPipeline& LinearPipeline::add_stage(std::function<OutputType(InputType)> map) {
     std::atomic<unsigned int> *run_flag = new std::atomic<unsigned int>(0);
     auto index = stage_running_flags.size();
     stage_running_flags.push_back(run_flag);
@@ -693,10 +712,12 @@ void LinearPipeline::add_stage(std::function<OutputType(InputType)> map) {
     id_to_task_map[index] = stage_task;
     task_chain.push_back(stage_task);
     task_chain[index - 1].precede(stage_task);
+
+    return *this;
 }
 
 template<class SourceType, class OutputType>
-void LinearPipeline::set_source(std::string connection_string, unsigned int max_read_rate) {
+LinearPipeline& LinearPipeline::set_source(std::string connection_string, unsigned int max_read_rate) {
     std::atomic<unsigned int> *run_flag = new std::atomic<unsigned int>(0);
     auto index = stage_running_flags.size();
     stage_running_flags.push_back(run_flag);
@@ -732,10 +753,12 @@ void LinearPipeline::set_source(std::string connection_string, unsigned int max_
     id_to_task_map[index] = source_task;
     task_chain.push_back(source_task);
     init.precede(source_task);
+
+    return *this;
 };
 
 template<class InputType>
-void LinearPipeline::set_sink(SinkAdapter<InputType> *sink_adapter) {
+LinearPipeline& LinearPipeline::set_sink(SinkAdapter<InputType> *sink_adapter) {
     std::atomic<unsigned int> *run_flag = new std::atomic<unsigned int>(0);
     auto index = stage_running_flags.size();
     stage_running_flags.push_back(run_flag);
@@ -771,6 +794,8 @@ void LinearPipeline::set_sink(SinkAdapter<InputType> *sink_adapter) {
     id_to_task_map[index] = sink_task;
     task_chain.push_back(sink_task);
     task_chain[index - 1].precede(sink_task);
+
+    return *this;
 };
 
 unsigned int map_conditional_jump_to_start(LinearPipeline *lp) {
