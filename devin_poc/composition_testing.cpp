@@ -30,7 +30,11 @@ int main(int argc, char **argv) {
     if (argc > 1) {
         rate_per_sec = std::stoi(argv[1]);
     }
-    unsigned int timeout = 300;
+
+    unsigned int timeout = 10;
+    if (argc > 2) {
+        timeout = std::stoi(argv[2]);
+    }
     int workers = 16;
 
     tf::Executor executor(workers);
@@ -38,14 +42,19 @@ int main(int argc, char **argv) {
     LinearPipeline lp(executor, true);
 
     lp.set_source<std::fstream, std::string>("devin_poc/without_data_len.json", rate_per_sec);
-    lp.add_stage(std::function<json(std::string)>(work_routine_string_to_json));
-    lp.add_stage(std::function<json(json)>(work_routine_random_work_on_json_object));
-    lp.add_stage(std::function<json(json)>(work_routine_random_work_on_json_object));
-    lp.add_stage(std::function<json(json)>(work_routine_random_work_on_json_object));
-    lp.add_stage(std::function<json(json)>(work_routine_random_work_on_json_object));
-    lp.set_sink<json, SinkThrowAway<json>>("");
-    lp.add_conditional_stage(work_routine_conditional_jump_to_start);
-    lp.start();
+    lp.add_stage(new RandomDropFilter<std::string>());
+    lp.add_stage(std::function(map_string_to_json));
+    lp.add_stage(std::function(map_random_work_on_json_object));
+    lp.add_stage(new ReplicationSubDivideWorkAdapter<json, json>(10));
+    lp.add_stage(new RandomTrigWorkAdapter<json, json>());
+    lp.add_stage(new ReplicationSubDivideWorkAdapter<json, json>(1000));
+    lp.add_stage(std::function(map_random_work_on_json_object));
+    lp.add_stage(new BatchingWorkAdapter<json>());
+    lp.add_stage(new RandomDropFilter<BatchObject<json>*>());
+    lp.set_sink(new DiscardSinkAdapter<BatchObject<json>*>());
+    lp.add_conditional_stage(map_conditional_jump_to_start);
+    lp.visualize("main_graph.dot");
+    lp.start(timeout);
 
     return 0;
 }
