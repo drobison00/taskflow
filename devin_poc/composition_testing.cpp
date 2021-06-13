@@ -42,7 +42,7 @@ int main(int argc, char **argv) {
     LinearPipeline lp(executor, true);
 
     lp.set_source<std::fstream, std::string>("devin_poc/without_data_len.json", rate_per_sec)
-     //.add_stage(new RandomDropFilter<std::string>())
+     //.add_stage(new RandomDropFilter<std::string>()) same as .filter(filter_random_drop)
      .filter(filter_random_drop)
      .map(map_string_to_json)
      .map(map_random_work_on_json_object)

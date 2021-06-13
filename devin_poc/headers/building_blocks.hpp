@@ -76,7 +76,7 @@ public:
     }
 };
 
-// Specialize for specific input/output cases
+// Specialize for specific input/output cases currently hacked to produce forever.
 template<>
 void SourceAdapter<std::fstream, std::string>::pump() {
     //std::string data;
@@ -207,7 +207,6 @@ public:
             map{map}, input{input} {
         output = OutputQueue(new BlockingConcurrentQueue<OutputType>(max_queue_size));
     };
-
 
     int pump() override;
 
@@ -362,7 +361,6 @@ int ReplicationSubDivideWorkAdapter<InputType, OutputType>::pump() {
 
     return this->processed;
 };
-
 
 template<class DataType>
 class BatchingWorkAdapter : public StageAdapter<DataType, std::shared_ptr<BatchObject<DataType>>> {
@@ -828,6 +826,7 @@ LinearLinkInfo<InputType, InputType> LinearPipeline::set_sink(SinkAdapter<InputT
     return LinearLinkInfo<InputType, InputType>(*this);
 };
 
+// TODO: Hacky. just experimenting for improved function chaining
 template <class InputType, class OutputType>
 class LinearLinkInfo {
 public:
