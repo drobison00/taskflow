@@ -47,11 +47,11 @@ int main(int argc, char **argv) {
     lp.add_stage(std::function(map_random_work_on_json_object));
     lp.add_stage(new ReplicationSubDivideWorkAdapter<json, json>(10));
     lp.add_stage(new RandomTrigWorkAdapter<json, json>());
-    lp.add_stage(new ReplicationSubDivideWorkAdapter<json, json>(1000));
+    lp.add_stage(new ReplicationSubDivideWorkAdapter<json, json>(10));
     lp.add_stage(std::function(map_random_work_on_json_object));
     lp.add_stage(new BatchingWorkAdapter<json>());
-    lp.add_stage(new RandomDropFilter<BatchObject<json>*>());
-    lp.set_sink(new DiscardSinkAdapter<BatchObject<json>*>());
+    lp.add_stage(new RandomDropFilter<std::shared_ptr<BatchObject<json>>>());
+    lp.set_sink(new DiscardSinkAdapter<std::shared_ptr<BatchObject<json>>>());
     lp.add_conditional_stage(map_conditional_jump_to_start);
     lp.visualize("main_graph.dot");
     lp.start(timeout);

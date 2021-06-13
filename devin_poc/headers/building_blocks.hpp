@@ -144,7 +144,6 @@ void DiscardSinkAdapter<InputType>::pump() {
 
     count = this->input->wait_dequeue_bulk_timed(&in[0], 1, std::chrono::milliseconds(10));
     if (count > 0) {
-        delete in[0];
         this->processed += 1;
     }
 }
@@ -346,13 +345,14 @@ int ReplicationSubDivideWorkAdapter<InputType, OutputType>::pump() {
 
 
 template<class DataType>
-class BatchingWorkAdapter : public StageAdapter<DataType, BatchObject<DataType>*> {
+class BatchingWorkAdapter : public StageAdapter<DataType, std::shared_ptr<BatchObject<DataType>>> {
 public:
     unsigned int timeout;
     unsigned int batch_size;
 
     BatchingWorkAdapter(unsigned int batch_size = 10, unsigned int timeout = 10) :
-            batch_size{batch_size}, timeout{timeout}, StageAdapter<DataType, BatchObject<DataType>*>() {
+            batch_size{batch_size}, timeout{timeout},
+            StageAdapter<DataType, std::shared_ptr<BatchObject<DataType>>>() {
     };
 
     int pump() override;
@@ -363,7 +363,8 @@ int BatchingWorkAdapter<DataType>::pump() {
     bool sent;
     size_t count = 0;
 
-    auto batch_object = new BatchObject<DataType>(batch_size);
+    //auto batch_object = new BatchObject<DataType>(batch_size);
+    auto batch_object = std::shared_ptr<BatchObject<DataType>>(new BatchObject<DataType>(batch_size));
 
     count = this->input->wait_dequeue_bulk_timed(batch_object->batch.get(),
                                                  batch_size, std::chrono::milliseconds(timeout));
