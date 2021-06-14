@@ -41,20 +41,22 @@ int main(int argc, char **argv) {
     LinearPipeline lp(executor, true);
 
     lp.set_source<std::fstream, std::string>("devin_poc/without_data_len.json", rate_per_sec)
-     .filter(filter_random_drop)
-     .map(map_string_to_json)
-     .explode(exploder_duplicate<json>)
-     .map(map_random_work_on_json_object)
-     .explode(exploder_duplicate<json>)
-     .filter(filter_random_drop)
-     .map(map_random_trig_work<json>)
-     .explode(exploder_duplicate<json, json>)
-     .map(map_random_work_on_json_object)
-     .batch(10, 10)
-     .set_sink(std::string(""), sink_discard)
-     .add_conditional_stage(map_conditional_jump_to_start)
+     .filter(filter_random_drop)                // Randomly drop 50% of packets
+     .map(map_string_to_json)                   // Parse strings into JSON objects
+     .map(map_random_work_on_json_object)       // Perform various operations on each JSON object
+     .map(map_random_trig_work<json>)           // Do intensive trig work and forward JSON packets
+     .explode(exploder_duplicate<json>)         // Duplicate every JSON object 10x
+     .filter(filter_random_drop)                // Randomly drop 50% of packets
+     .map(map_random_trig_work<json>)           // Do intensive trig work and forward JSON packets
+     .explode(exploder_duplicate<json, json>)   // Duplicated every JSON object 10x
+     .batch(10, 10)                             // Batch 10 JSON objects at a time and forward
+     .set_sink(std::string(""), sink_discard)   // Sink all packets
+     .add_conditional_stage(map_conditional_jump_to_start) // Taskflow loopback
      .visualize("main_graph.dot")
      .start(timeout);
+
+    std::cout << "Stopped" << std::endl;
+    std::this_thread::sleep_for(std::chrono::seconds(5));
 
     return 0;
 }

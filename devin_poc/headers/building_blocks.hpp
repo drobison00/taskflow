@@ -48,6 +48,8 @@ public:
     std::string connection_string;
     std::string data_debug;
 
+    std::atomic<unsigned int> running = 0;
+
     unsigned int processed;
     unsigned int max_read_rate;
     unsigned int max_queue_size = (2 << 15);
@@ -115,6 +117,8 @@ class SinkAdapter : public SinkAdapterBase {
 public:
     using InputQueue = std::shared_ptr <BlockingConcurrentQueue<std::shared_ptr<InputType>>>;
 
+    std::atomic<unsigned int> running = 0;
+
     std::string connection_string;
     unsigned int processed;
     InputQueue input;
@@ -168,6 +172,8 @@ public:
     using OutputQueueType = BlockingConcurrentQueue<std::shared_ptr<OutputType>>;
     using OutputQueue = std::shared_ptr <OutputQueueType>;
 
+    std::atomic<unsigned int> running = 0;
+
     unsigned int processed = 0;
     unsigned int input_batch_size = 1;
     unsigned int output_batch_size = 1;
@@ -219,11 +225,8 @@ int StageAdapter<InputType, OutputType>::pump() {
 
     count = input->wait_dequeue_bulk_timed(&input_buffer, 1, std::chrono::milliseconds(10));
     if (count > 0) {
-        //std::stringstream sstream;
-        //sstream << "Popped: " << *(in.get()) << std::endl;
         output_buffer = std::shared_ptr<OutputType>(map(input_buffer.get()));
-        //std::cout << "Pushing: " << *output_buffer.get() << std::endl;
-        while (not(sent = output->try_enqueue_bulk(&output_buffer, 1))) {
+        while (running && not(sent = output->try_enqueue_bulk(&output_buffer, 1))) {
             std::this_thread::sleep_for(std::chrono::nanoseconds(100));
         };
 
@@ -232,83 +235,6 @@ int StageAdapter<InputType, OutputType>::pump() {
 
     return processed;
 };
-
-/*
-template<class InputType, class OutputType>
-class StageAdapter<Batch<InputType>, OutputType> : public StageAdapterBase {
-public:
-    using InputQueueType = BlockingConcurrentQueue<std::shared_ptr<Batch<InputType>>>;
-    using InputQueue = std::shared_ptr <InputQueueType>;
-
-    using OutputQueueType = BlockingConcurrentQueue<std::shared_ptr<OutputType>>;
-    using OutputQueue = std::shared_ptr <OutputQueueType>;
-
-    unsigned int processed = 0;
-    unsigned int input_batch_size = 1;
-    unsigned int output_batch_size = 1;
-    unsigned int max_queue_size = 6 * (2 << 15);
-
-    std::function<OutputType*(InputType *)> map;
-
-    InputQueue input;
-    OutputQueue output;
-
-    std::shared_ptr<Batch<InputType>> input_buffer;
-    std::shared_ptr<OutputType> output_buffer;
-
-    StageAdapter() {
-        output = OutputQueue(new OutputQueueType(max_queue_size));
-    };
-
-    StageAdapter(InputQueue input) : input{input} {
-        output = OutputQueue(new OutputQueueType(max_queue_size));
-    };
-
-    StageAdapter(std::function<OutputType*(InputType *)> map) :
-            map{map} {
-        output = OutputQueue(new OutputQueueType(max_queue_size));
-    };
-
-    StageAdapter(std::function<OutputType*(InputType *)> map, InputQueue input) :
-            map{map}, input{input} {
-        output = OutputQueue(new OutputQueueType(max_queue_size));
-    };
-
-    int pump() override;
-
-    unsigned int queue_size() {
-        return input->size_approx();
-    }
-
-    OutputQueue get_output_edge() {
-        return output;
-    }
-};
-
-// Update so that we can take in output types for reference values, or shared_ptr's to types
-// Then we only pass around objects that can clean themselves up
-template<class InputType, class OutputType>
-int StageAdapter<Batch<InputType>, OutputType>::pump() {
-    bool sent;
-    size_t count = 0;
-
-    count = input->wait_dequeue_bulk_timed(&input_buffer, 1, std::chrono::milliseconds(10));
-    if (count > 0) {
-        //Iterate over the batch
-        for (int i = 0; i < input_buffer->batch_size; i++) {
-            output_buffer = std::shared_ptr<OutputType>(
-                        map(input_buffer->batch[i].get())
-                    );
-            while (not(sent = output->try_enqueue_bulk(&output_buffer, 1))) {
-                std::this_thread::sleep_for(std::chrono::nanoseconds(100));
-            };
-        }
-        processed += 1;
-    }
-
-    return processed;
-};
-*/
 
 template<class DataType>
 class FilterAdapter : public StageAdapter<DataType, DataType> {
@@ -336,7 +262,7 @@ int FilterAdapter<DataType>::pump() {
     count = this->input->wait_dequeue_bulk_timed(&in, 1, std::chrono::milliseconds(10));
     if (count > 0) {
         if (this->filter(in.get())) {
-            while (not(sent = this->output->try_enqueue_bulk(&in, 1))) {
+            while (this->running && not(sent = this->output->try_enqueue_bulk(&in, 1))) {
                 std::this_thread::sleep_for(std::chrono::nanoseconds(100));
             };
             this->processed += 1;
@@ -383,7 +309,7 @@ int ExplodeAdapter<InputType, OutputType>::pump() {
         }
         delete out;
 
-        while (not(sent = this->output->try_enqueue_bulk(&buffer_out[0], buffer_sz))) {
+        while (this->running && not(sent = this->output->try_enqueue_bulk(&buffer_out[0], buffer_sz))) {
             std::this_thread::sleep_for(std::chrono::nanoseconds(100));
         }
 
@@ -423,7 +349,7 @@ int BatchingWorkAdapter<DataType>::pump() {
             batch_object->batch[i] = DataType(*thebatch[i].get());
         }
 
-        while (not(sent = this->output->try_enqueue_bulk(&batch_object, 1))) {
+        while (this->running && not(sent = this->output->try_enqueue_bulk(&batch_object, 1))) {
             std::this_thread::sleep_for(std::chrono::nanoseconds(100));
         }
 
@@ -479,7 +405,7 @@ bool filter_random_drop(DataType *d) {
 template<typename DataType>
 DataType* map_random_trig_work(DataType *d) {
     double MYPI = 3.14159265;
-    int how_many = std::rand() % 10000;
+    int how_many = std::rand() % 100000;
     double random_angle_rads = MYPI * ((double) std::rand() / (double) RAND_MAX);
 
     for (int i = 0; i < how_many;) {
@@ -547,7 +473,6 @@ public:
 
     std::atomic<unsigned int> pipeline_running = 0;
     std::vector <std::atomic <unsigned int>*> stage_running_flags;
-    std::vector <std::shared_ptr<void>> stage_adapters;
     std::vector <std::shared_ptr<void>> edges;
     std::vector <std::unique_ptr<TaskStats>> task_stats;
     std::map<unsigned int, tf::Task> id_to_task_map;
@@ -575,7 +500,7 @@ public:
             std::cout << "Initializing Pipeline" << std::endl;
 
             if (this->print_stats) {
-                service_executor.async([this]() {
+                service_executor.silent_async([this]() {
                     unsigned int freq_ms = 33;
                     std::stringstream sstream;
 
@@ -625,7 +550,7 @@ public:
         pipeline_running = 1;
 
         if (runtime > 0) {
-            service_executor.async([this, runtime]() {
+            service_executor.silent_async([this, runtime]() {
                 std::this_thread::sleep_for(std::chrono::seconds(runtime));
                 this->stop();
             });
@@ -639,6 +564,11 @@ public:
     LinearPipeline& stop() {
         pipeline_running = 0;
 
+        for (auto it = stage_running_flags.begin(); it != stage_running_flags.end(); it++) {
+            while (**it == 1) {
+                std::this_thread::sleep_for(std::chrono::nanoseconds(100));
+            }
+        }
         return *this;
     }
 
@@ -746,10 +676,7 @@ public:
 LinearPipeline& LinearPipeline::add_conditional_stage(unsigned int (*cond_test)(LinearPipeline *)) {
     // TODO: this is entirely ad-hoc right now. It exists only as a way to add the jump to start
     // conditional. Still thinking through the architecture requirements to generalize.
-    std::atomic<unsigned int> *run_flag = new std::atomic<unsigned int>(0);
-    auto index = stage_running_flags.size();
-    stage_running_flags.push_back(run_flag);
-
+    auto index = edges.size();
 
     task_stats.push_back(std::unique_ptr<TaskStats>(new TaskStats()));
     task_stats[index]->stage_type = StageType::conditional;
@@ -769,9 +696,7 @@ LinearPipeline& LinearPipeline::add_conditional_stage(unsigned int (*cond_test)(
 
 template<class InputType, class OutputType>
 LinearLinkInfo<InputType, OutputType> LinearPipeline::add_stage(StageAdapter<InputType, OutputType> *stage_adapter) {
-    std::atomic<unsigned int> *run_flag = new std::atomic<unsigned int>(0);
-    auto index = stage_running_flags.size();
-    stage_running_flags.push_back(run_flag);
+    auto index = edges.size();
 
     std::cout << "Adding stage (adapter constructor) " << index << std::endl;
     std::shared_ptr <BlockingConcurrentQueue<std::shared_ptr<InputType>>> input =
@@ -780,7 +705,6 @@ LinearLinkInfo<InputType, OutputType> LinearPipeline::add_stage(StageAdapter<Inp
     auto adapter = std::shared_ptr<StageAdapter<InputType, OutputType>>(stage_adapter);
     adapter->input = input;
 
-    stage_adapters.push_back(adapter);
     edges.push_back(adapter->get_output_edge());
     task_stats.push_back(std::unique_ptr<TaskStats>(new TaskStats()));
     task_stats[index]->last_visited = std::chrono::steady_clock::now();
@@ -789,13 +713,13 @@ LinearLinkInfo<InputType, OutputType> LinearPipeline::add_stage(StageAdapter<Inp
     tf::Task stage_task = pipeline.emplace([this, index, adapter]() {
         unsigned int a = 0, b = 1;
 
-        if ((this->stage_running_flags[index])->compare_exchange_strong(a, b)) {
+        if (adapter->running.compare_exchange_strong(a, b)) {
             std::cout << "Initializing stage " << index << " task." << std::endl;
-            service_executor.async([&]() {
+            service_executor.silent_async([&]() {
                 while (this->pipeline_running == 1) {
                     adapter->pump();
                 }
-                this->stage_running_flags[index]->compare_exchange_strong(b, a);
+                adapter->running.compare_exchange_strong(b, a);
             });
         }
 
@@ -811,9 +735,7 @@ LinearLinkInfo<InputType, OutputType> LinearPipeline::add_stage(StageAdapter<Inp
 
 template<class InputType, class OutputType>
 LinearLinkInfo<InputType, OutputType> LinearPipeline::add_stage(std::function<OutputType*(InputType*)> map) {
-    std::atomic<unsigned int> *run_flag = new std::atomic<unsigned int>(0);
-    auto index = stage_running_flags.size();
-    stage_running_flags.push_back(run_flag);
+    auto index = edges.size();
 
     std::cout << "Adding stage " << index << std::endl;
     std::shared_ptr <BlockingConcurrentQueue<std::shared_ptr<InputType>>> input =
@@ -822,7 +744,6 @@ LinearLinkInfo<InputType, OutputType> LinearPipeline::add_stage(std::function<Ou
     auto adapter = std::shared_ptr<StageAdapter<InputType, OutputType>>(
             new StageAdapter<InputType, OutputType>(map, input));
 
-    stage_adapters.push_back(adapter);
     edges.push_back(adapter->get_output_edge());
     task_stats.push_back(std::unique_ptr<TaskStats>(new TaskStats()));
     task_stats[index]->last_visited = std::chrono::steady_clock::now();
@@ -831,13 +752,13 @@ LinearLinkInfo<InputType, OutputType> LinearPipeline::add_stage(std::function<Ou
     tf::Task stage_task = pipeline.emplace([this, index, adapter]() {
         unsigned int a = 0, b = 1;
 
-        if ((this->stage_running_flags[index])->compare_exchange_strong(a, b)) {
+        if (adapter->running.compare_exchange_strong(a, b)) {
             std::cout << "Initializing stage " << index << " task." << std::endl;
-            service_executor.async([&]() {
+            service_executor.silent_async([&]() {
                 while (this->pipeline_running == 1) {
                     adapter->pump();
                 }
-                this->stage_running_flags[index]->compare_exchange_strong(b, a);
+                adapter->running.compare_exchange_strong(b, a);
             });
         }
 
@@ -852,15 +773,13 @@ LinearLinkInfo<InputType, OutputType> LinearPipeline::add_stage(std::function<Ou
 }
 
 template<class SourceType, class OutputType>
-LinearLinkInfo<SourceType, OutputType> LinearPipeline::set_source(std::string connection_string, unsigned int max_read_rate) {
-    std::atomic<unsigned int> *run_flag = new std::atomic<unsigned int>(0);
-    auto index = stage_running_flags.size();
-    stage_running_flags.push_back(run_flag);
+LinearLinkInfo<SourceType, OutputType> LinearPipeline::set_source(std::string connection_string,
+                                                                  unsigned int max_read_rate) {
+    auto index = edges.size();
 
     auto adapter = std::shared_ptr<SourceAdapter<SourceType, OutputType>>(
             new SourceAdapter<SourceType, OutputType>(connection_string, max_read_rate));
 
-    stage_adapters.push_back(adapter);
     edges.push_back(adapter->get_output_edge());
     task_stats.push_back(std::unique_ptr<TaskStats>(new TaskStats()));
     task_stats[index]->last_visited = std::chrono::steady_clock::now();
@@ -870,17 +789,17 @@ LinearLinkInfo<SourceType, OutputType> LinearPipeline::set_source(std::string co
     tf::Task source_task = pipeline.emplace([this, adapter, index]() {
         unsigned int a = 0, b = 1;
 
-        if ((this->stage_running_flags[index])->compare_exchange_strong(a, b)) {
+        if (adapter->running.compare_exchange_strong(a, b)) {
             std::cout << "Initializing source task." << std::endl;
             adapter->init();
 
-            service_executor.async([&]() {
+            service_executor.silent_async([&]() {
                 while (this->pipeline_running == 1) {
                     if (this->task_stats[index]->avg_throughput <= adapter->max_read_rate) {
                         adapter->pump();
                     }
                 }
-                this->stage_running_flags[index]->compare_exchange_strong(b, a);
+                adapter->running.compare_exchange_strong(b, a);
             });
         }
 
@@ -896,9 +815,7 @@ LinearLinkInfo<SourceType, OutputType> LinearPipeline::set_source(std::string co
 
 template<class InputType>
 LinearLinkInfo<InputType, InputType> LinearPipeline::set_sink(SinkAdapter<InputType> *sink_adapter) {
-    std::atomic<unsigned int> *run_flag = new std::atomic<unsigned int>(0);
-    auto index = stage_running_flags.size();
-    stage_running_flags.push_back(run_flag);
+    auto index = edges.size();
 
     std::shared_ptr <BlockingConcurrentQueue<std::shared_ptr<InputType>>> input =
             std::static_pointer_cast < BlockingConcurrentQueue<std::shared_ptr<InputType>>> (edges[index - 1]);
@@ -906,7 +823,6 @@ LinearLinkInfo<InputType, InputType> LinearPipeline::set_sink(SinkAdapter<InputT
     sink_adapter->input = input;
     auto adapter = std::shared_ptr<SinkAdapter<InputType>>(sink_adapter);
 
-    stage_adapters.push_back(adapter);
     task_stats.push_back(std::unique_ptr<TaskStats>(new TaskStats()));
     task_stats[index]->last_visited = std::chrono::steady_clock::now();
     task_stats[index]->stage_type = StageType::sink;
@@ -915,13 +831,13 @@ LinearLinkInfo<InputType, InputType> LinearPipeline::set_sink(SinkAdapter<InputT
     tf::Task sink_task = pipeline.emplace([this, adapter, index]() {
         unsigned int a = 0, b = 1;
 
-        if ((this->stage_running_flags[index])->compare_exchange_strong(a, b)) {
+        if (adapter->running.compare_exchange_strong(a, b)) {
             std::cout << "Initializing sink task." << std::endl;
             adapter->init();
 
-            service_executor.async([&]() {
+            service_executor.silent_async([&]() {
                 while (this->pipeline_running == 1) { adapter->pump(); }
-                this->stage_running_flags[index]->compare_exchange_strong(b, a);
+                adapter->running.compare_exchange_strong(b, a);
             });
         }
 
@@ -938,17 +854,14 @@ LinearLinkInfo<InputType, InputType> LinearPipeline::set_sink(SinkAdapter<InputT
 template<class InputType>
 LinearLinkInfo<InputType, InputType> LinearPipeline::set_sink(std::string connection_string,
         std::function<void(InputType*)> sink) {
-    std::atomic<unsigned int> *run_flag = new std::atomic<unsigned int>(0);
-    auto index = stage_running_flags.size();
-    stage_running_flags.push_back(run_flag);
+    auto index = edges.size();
 
     std::shared_ptr <BlockingConcurrentQueue<std::shared_ptr<InputType>>> input =
-            std::static_pointer_cast < BlockingConcurrentQueue<std::shared_ptr<InputType>>> (edges[index - 1]);
+            std::static_pointer_cast <BlockingConcurrentQueue<std::shared_ptr<InputType>>> (edges[index - 1]);
 
     auto adapter = std::shared_ptr<SinkAdapter<InputType>>(
             new SinkAdapter<InputType>(connection_string, sink, input));
 
-    stage_adapters.push_back(adapter);
     task_stats.push_back(std::unique_ptr<TaskStats>(new TaskStats()));
     task_stats[index]->last_visited = std::chrono::steady_clock::now();
     task_stats[index]->stage_type = StageType::sink;
@@ -957,13 +870,13 @@ LinearLinkInfo<InputType, InputType> LinearPipeline::set_sink(std::string connec
     tf::Task sink_task = pipeline.emplace([this, adapter, index]() {
         unsigned int a = 0, b = 1;
 
-        if ((this->stage_running_flags[index])->compare_exchange_strong(a, b)) {
+        if (adapter->running.compare_exchange_strong(a, b)) {
             std::cout << "Initializing sink task." << std::endl;
             adapter->init();
 
-            service_executor.async([&]() {
+            service_executor.silent_async([&]() {
                 while (this->pipeline_running == 1) { adapter->pump(); }
-                this->stage_running_flags[index]->compare_exchange_strong(b, a);
+                adapter->running.compare_exchange_strong(b, a);
             });
         }
 
