@@ -28,15 +28,15 @@ template<class InputType, class OutputType>
 class StageAdapter;
 
 template<class DataType>
-class BatchObject {
+class Batch {
 public:
     // Maybe other info
     unsigned int batch_size;
     std::shared_ptr<DataType[]> batch;
 
-    BatchObject() : batch_size{0}, batch{nullptr} {};
+    Batch() : batch_size{0}, batch{nullptr} {};
 
-    BatchObject(unsigned int batch_size) : batch_size{batch_size} {
+    Batch(unsigned int batch_size) : batch_size{batch_size} {
         batch = std::shared_ptr<DataType[]>(new DataType[batch_size]);
     };
 };
@@ -52,14 +52,15 @@ public:
     unsigned int max_read_rate;
     unsigned int max_queue_size = (2 << 15);
 
-    using OutputQueue = std::shared_ptr <BlockingConcurrentQueue<OutputType>>;
+    using QueueType = BlockingConcurrentQueue<std::shared_ptr<OutputType>>;
+    using OutputQueue = std::shared_ptr<QueueType>;
 
     SourceType source;
     OutputQueue output;
 
     SourceAdapter(std::string connection_string, unsigned int max_read_rate) :
             connection_string{connection_string}, max_read_rate{max_read_rate}, processed{0} {
-        output = OutputQueue(new BlockingConcurrentQueue<OutputType>(max_queue_size));
+        output = OutputQueue(new QueueType(max_queue_size));
     };
 
     void init();
@@ -82,8 +83,9 @@ void SourceAdapter<std::fstream, std::string>::pump() {
     //std::string data;
     //std::getline(source, data);
 
-    static bool sent;
-    while (not(sent = output->try_enqueue_bulk(&data_debug, 1))) {
+    bool sent;
+    std::shared_ptr<std::string> s(new std::string(data_debug));
+    while (not(sent = output->try_enqueue_bulk(&s, 1))) {
         std::this_thread::sleep_for(std::chrono::nanoseconds(100));
     }
     processed += 1;
@@ -111,16 +113,19 @@ public:
 template<class InputType>
 class SinkAdapter : public SinkAdapterBase {
 public:
-    using InputQueue = std::shared_ptr <BlockingConcurrentQueue<InputType>>;
+    using InputQueue = std::shared_ptr <BlockingConcurrentQueue<std::shared_ptr<InputType>>>;
 
     std::string connection_string;
     unsigned int processed;
     InputQueue input;
 
-    SinkAdapter() : connection_string(""), processed{0} {};
+    std::function<void(InputType *)> sink;
 
-    SinkAdapter(std::string connection_string, InputQueue input) :
-            connection_string{connection_string}, input{input}, processed{0} {};
+    SinkAdapter(std::function<void(InputType*)> sink) :
+        connection_string(""), sink{sink}, processed{0} {};
+
+    SinkAdapter(std::string connection_string, std::function<void(InputType*)> sink, InputQueue input) :
+            connection_string{connection_string}, sink{sink}, input{input}, processed{0} {};
 
     void init() override;
 
@@ -135,33 +140,16 @@ template<class InputType>
 void SinkAdapter<InputType>::init() {};
 
 template<class InputType>
-void SinkAdapter<InputType>::pump() {};
-
-template<class InputType>
-class DiscardSinkAdapter : public SinkAdapter<InputType> {
-public:
-    using InputQueue = std::shared_ptr <BlockingConcurrentQueue<InputType>>;
-
-    DiscardSinkAdapter() : SinkAdapter<InputType>() {};
-
-    DiscardSinkAdapter(InputQueue input) : SinkAdapter<InputType>(input) {};
-
-    void init() override {};
-
-    void pump() override;
-};
-
-template<class InputType>
-void DiscardSinkAdapter<InputType>::pump() {
+void SinkAdapter<InputType>::pump() {
     size_t count;
-    InputType in[1];
+    std::shared_ptr<InputType> in;
 
-    count = this->input->wait_dequeue_bulk_timed(&in[0], 1, std::chrono::milliseconds(10));
+    count = this->input->wait_dequeue_bulk_timed(&in, 1, std::chrono::milliseconds(10));
     if (count > 0) {
+        sink(in.get());
         this->processed += 1;
     }
-}
-
+};
 
 // Stage Adapters
 class StageAdapterBase {
@@ -174,38 +162,41 @@ public:
 template<class InputType, class OutputType>
 class StageAdapter : public StageAdapterBase {
 public:
-    using InputQueue = std::shared_ptr <BlockingConcurrentQueue<InputType>>;
-    using OutputQueue = std::shared_ptr <BlockingConcurrentQueue<OutputType>>;
+    using InputQueueType = BlockingConcurrentQueue<std::shared_ptr<InputType>>;
+    using InputQueue = std::shared_ptr <InputQueueType>;
+
+    using OutputQueueType = BlockingConcurrentQueue<std::shared_ptr<OutputType>>;
+    using OutputQueue = std::shared_ptr <OutputQueueType>;
 
     unsigned int processed = 0;
     unsigned int input_batch_size = 1;
     unsigned int output_batch_size = 1;
     unsigned int max_queue_size = 6 * (2 << 15);
 
-    std::function<OutputType(InputType)> map;
+    std::function<OutputType*(InputType *)> map;
 
     InputQueue input;
     OutputQueue output;
 
-    std::unique_ptr<InputType> input_buffer = std::unique_ptr<InputType>(new InputType[1]);
-    std::unique_ptr<OutputType> output_buffer = std::unique_ptr<OutputType>(new OutputType[1]);
+    std::shared_ptr<InputType> input_buffer;
+    std::shared_ptr<OutputType> output_buffer;
 
     StageAdapter() {
-        output = OutputQueue(new BlockingConcurrentQueue<OutputType>(max_queue_size));
+        output = OutputQueue(new OutputQueueType(max_queue_size));
     };
 
     StageAdapter(InputQueue input) : input{input} {
-        output = OutputQueue(new BlockingConcurrentQueue<OutputType>(max_queue_size));
+        output = OutputQueue(new OutputQueueType(max_queue_size));
     };
 
-    StageAdapter(std::function<OutputType(InputType)> map) :
+    StageAdapter(std::function<OutputType*(InputType *)> map) :
             map{map} {
-        output = OutputQueue(new BlockingConcurrentQueue<OutputType>(max_queue_size));
+        output = OutputQueue(new OutputQueueType(max_queue_size));
     };
 
-    StageAdapter(std::function<OutputType(InputType)> map, InputQueue input) :
+    StageAdapter(std::function<OutputType*(InputType *)> map, InputQueue input) :
             map{map}, input{input} {
-        output = OutputQueue(new BlockingConcurrentQueue<OutputType>(max_queue_size));
+        output = OutputQueue(new OutputQueueType(max_queue_size));
     };
 
     int pump() override;
@@ -219,17 +210,21 @@ public:
     }
 };
 
+// Update so that we can take in output types for reference values, or shared_ptr's to types
+// Then we only pass around objects that can clean themselves up
 template<class InputType, class OutputType>
 int StageAdapter<InputType, OutputType>::pump() {
     bool sent;
     size_t count = 0;
 
-    count = input->wait_dequeue_bulk_timed(input_buffer.get(), 1, std::chrono::milliseconds(10));
+    count = input->wait_dequeue_bulk_timed(&input_buffer, 1, std::chrono::milliseconds(10));
     if (count > 0) {
-        *output_buffer.get() = map(*input_buffer.get());
-        while (not(sent = output->try_enqueue_bulk(output_buffer.get(), 1))) {
+        //std::stringstream sstream;
+        //sstream << "Popped: " << *(in.get()) << std::endl;
+        output_buffer = std::shared_ptr<OutputType>(map(input_buffer.get()));
+        //std::cout << "Pushing: " << *output_buffer.get() << std::endl;
+        while (not(sent = output->try_enqueue_bulk(&output_buffer, 1))) {
             std::this_thread::sleep_for(std::chrono::nanoseconds(100));
-            // do something while spinning?
         };
 
         processed += 1;
@@ -238,18 +233,95 @@ int StageAdapter<InputType, OutputType>::pump() {
     return processed;
 };
 
+/*
+template<class InputType, class OutputType>
+class StageAdapter<Batch<InputType>, OutputType> : public StageAdapterBase {
+public:
+    using InputQueueType = BlockingConcurrentQueue<std::shared_ptr<Batch<InputType>>>;
+    using InputQueue = std::shared_ptr <InputQueueType>;
+
+    using OutputQueueType = BlockingConcurrentQueue<std::shared_ptr<OutputType>>;
+    using OutputQueue = std::shared_ptr <OutputQueueType>;
+
+    unsigned int processed = 0;
+    unsigned int input_batch_size = 1;
+    unsigned int output_batch_size = 1;
+    unsigned int max_queue_size = 6 * (2 << 15);
+
+    std::function<OutputType*(InputType *)> map;
+
+    InputQueue input;
+    OutputQueue output;
+
+    std::shared_ptr<Batch<InputType>> input_buffer;
+    std::shared_ptr<OutputType> output_buffer;
+
+    StageAdapter() {
+        output = OutputQueue(new OutputQueueType(max_queue_size));
+    };
+
+    StageAdapter(InputQueue input) : input{input} {
+        output = OutputQueue(new OutputQueueType(max_queue_size));
+    };
+
+    StageAdapter(std::function<OutputType*(InputType *)> map) :
+            map{map} {
+        output = OutputQueue(new OutputQueueType(max_queue_size));
+    };
+
+    StageAdapter(std::function<OutputType*(InputType *)> map, InputQueue input) :
+            map{map}, input{input} {
+        output = OutputQueue(new OutputQueueType(max_queue_size));
+    };
+
+    int pump() override;
+
+    unsigned int queue_size() {
+        return input->size_approx();
+    }
+
+    OutputQueue get_output_edge() {
+        return output;
+    }
+};
+
+// Update so that we can take in output types for reference values, or shared_ptr's to types
+// Then we only pass around objects that can clean themselves up
+template<class InputType, class OutputType>
+int StageAdapter<Batch<InputType>, OutputType>::pump() {
+    bool sent;
+    size_t count = 0;
+
+    count = input->wait_dequeue_bulk_timed(&input_buffer, 1, std::chrono::milliseconds(10));
+    if (count > 0) {
+        //Iterate over the batch
+        for (int i = 0; i < input_buffer->batch_size; i++) {
+            output_buffer = std::shared_ptr<OutputType>(
+                        map(input_buffer->batch[i].get())
+                    );
+            while (not(sent = output->try_enqueue_bulk(&output_buffer, 1))) {
+                std::this_thread::sleep_for(std::chrono::nanoseconds(100));
+            };
+        }
+        processed += 1;
+    }
+
+    return processed;
+};
+*/
 
 template<class DataType>
 class FilterAdapter : public StageAdapter<DataType, DataType> {
 public:
-    using InputQueue = std::shared_ptr <BlockingConcurrentQueue<DataType>>;
+    using InputQueueType = BlockingConcurrentQueue<std::shared_ptr<DataType>>;
+    using InputQueue = std::shared_ptr<InputQueueType>;
 
-    std::function<bool(DataType)> filter;
+    std::function<bool(DataType *)> filter;
 
-    FilterAdapter(std::function<bool(DataType)> filter) :
+    FilterAdapter(std::function<bool(DataType *)> filter) :
             filter{filter}, StageAdapter<DataType, DataType>() {};
 
-    FilterAdapter(std::function<bool(DataType)> filter, InputQueue input) :
+    FilterAdapter(std::function<bool(DataType *)> filter, InputQueue input) :
             filter{filter}, StageAdapter<DataType, DataType>(input) {};
 
     int pump() override;
@@ -259,14 +331,13 @@ template<class DataType>
 int FilterAdapter<DataType>::pump() {
     bool sent;
     size_t count = 0;
-    DataType in[1];
+    std::shared_ptr<DataType> in;
 
-    count = this->input->wait_dequeue_bulk_timed(&in[0], 1, std::chrono::milliseconds(10));
+    count = this->input->wait_dequeue_bulk_timed(&in, 1, std::chrono::milliseconds(10));
     if (count > 0) {
-        if (this->filter(in[0])) {
-            while (not(sent = this->output->try_enqueue_bulk(&in[0], 1))) {
+        if (this->filter(in.get())) {
+            while (not(sent = this->output->try_enqueue_bulk(&in, 1))) {
                 std::this_thread::sleep_for(std::chrono::nanoseconds(100));
-                // do something while spinning?
             };
             this->processed += 1;
         }
@@ -275,84 +346,44 @@ int FilterAdapter<DataType>::pump() {
     return 1;
 };
 
-
-template<class DataType>
-class RandomDropFilter : public FilterAdapter<DataType> {
-public:
-    static bool random_drop(DataType d) {
-        return (std::rand() % 2 == 0);
-    };
-
-    RandomDropFilter() : FilterAdapter<DataType>(std::function<bool(DataType)>(random_drop)) {};
-};
-
-
 template<class InputType, class OutputType>
-class RandomTrigWorkAdapter : public StageAdapter<InputType, OutputType> {
+class ExplodeAdapter : public StageAdapter<InputType, OutputType> {
 public:
-    static constexpr double MYPI = 3.14159265;
+    using InputQueueType = BlockingConcurrentQueue<std::shared_ptr<InputType>>;
+    using InputQueue = std::shared_ptr <InputQueueType>;
 
-    RandomTrigWorkAdapter() : StageAdapter<InputType, OutputType>(map) {};
+    using FunctionSignature = std::function<std::tuple<OutputType**, unsigned int>(InputType*)>;
 
-    static RandomTrigWorkAdapter *create() {
-        return new RandomTrigWorkAdapter<InputType, OutputType>();
-    }
+    FunctionSignature exploder;
 
-    static double trig_work() {
-        int how_many = std::rand() % 1000000;
-        double random_angle_rads = MYPI * ((double) std::rand() / (double) RAND_MAX);
+    ExplodeAdapter(FunctionSignature exploder) :
+        exploder{exploder}, StageAdapter<InputType, OutputType>() {};
 
-        for (int i = 0; i < how_many;) {
-            random_angle_rads = tan(atan(random_angle_rads));
-
-            // Don't let GCC optimize us away
-            __asm__ __volatile__("inc %[Incr]" : [Incr] "+r"(i));
-        }
-
-        return random_angle_rads;
-    }
-
-    static OutputType map(InputType data) {
-        trig_work();
-        return data;
-    }
-};
-
-
-template<class InputType, class OutputType>
-class ReplicationSubDivideWorkAdapter : public StageAdapter<InputType, OutputType> {
-public:
-    unsigned int buffer_sz;
-    std::shared_ptr<OutputType[]> buffer_out;
-
-    static ReplicationSubDivideWorkAdapter *create(unsigned int replica_count = 10) {
-        return new ReplicationSubDivideWorkAdapter<InputType, OutputType>(replica_count);
-    }
-
-    ReplicationSubDivideWorkAdapter(unsigned int replica_count = 10) :
-        buffer_sz{replica_count}, StageAdapter<InputType, OutputType>() {
-        buffer_out = std::shared_ptr<OutputType[]>(new OutputType[replica_count]);
-    };
-
-    void map(InputType data) {
-        for (int i = 0; i < buffer_sz; i++) {
-            buffer_out[i] = data;
-        }
-    }
+    ExplodeAdapter(FunctionSignature exploder, InputQueue input) :
+        exploder{exploder}, StageAdapter<InputType, OutputType>(input) {};
 
     int pump() override;
 };
 
 template<class InputType, class OutputType>
-int ReplicationSubDivideWorkAdapter<InputType, OutputType>::pump() {
+int ExplodeAdapter<InputType, OutputType>::pump() {
     bool sent;
     size_t count = 0;
-    InputType in[1];
+    unsigned int buffer_sz;
 
-    count = this->input->wait_dequeue_bulk_timed(&in[0], 1, std::chrono::milliseconds(10));
+    OutputType **out;
+    std::shared_ptr<InputType> in;
+
+    count = this->input->wait_dequeue_bulk_timed(&in, 1, std::chrono::milliseconds(10));
     if (count > 0) {
-        map(in[0]);
-        while (not(sent = this->output->try_enqueue_bulk(buffer_out.get(), buffer_sz))) {
+        std::tie(out, buffer_sz) = exploder(in.get());
+        std::shared_ptr<OutputType> buffer_out[buffer_sz];
+        for(int i = 0; i < buffer_sz; i++) {
+            buffer_out[i] = std::shared_ptr<OutputType>(out[i]);
+        }
+        delete out;
+
+        while (not(sent = this->output->try_enqueue_bulk(&buffer_out[0], buffer_sz))) {
             std::this_thread::sleep_for(std::chrono::nanoseconds(100));
         }
 
@@ -363,18 +394,14 @@ int ReplicationSubDivideWorkAdapter<InputType, OutputType>::pump() {
 };
 
 template<class DataType>
-class BatchingWorkAdapter : public StageAdapter<DataType, std::shared_ptr<BatchObject<DataType>>> {
+class BatchingWorkAdapter : public StageAdapter<DataType, Batch<DataType>> {
 public:
     unsigned int timeout;
     unsigned int batch_size;
 
-    static BatchingWorkAdapter *create(unsigned int batch_size = 10, unsigned int timeout = 10) {
-        return new BatchingWorkAdapter<DataType>(batch_size, timeout);
-    }
-
     BatchingWorkAdapter(unsigned int batch_size = 10, unsigned int timeout = 10) :
             batch_size{batch_size}, timeout{timeout},
-            StageAdapter<DataType, std::shared_ptr<BatchObject<DataType>>>() {
+            StageAdapter<DataType, Batch<DataType>>() {
     };
 
     int pump() override;
@@ -385,14 +412,16 @@ int BatchingWorkAdapter<DataType>::pump() {
     bool sent;
     size_t count = 0;
 
-    //auto batch_object = new BatchObject<DataType>(batch_size);
-    auto batch_object = std::shared_ptr<BatchObject<DataType>>(new BatchObject<DataType>(batch_size));
+    std::shared_ptr<DataType> thebatch[batch_size];
 
-    count = this->input->wait_dequeue_bulk_timed(batch_object->batch.get(),
+    count = this->input->wait_dequeue_bulk_timed(&thebatch[0],
                                                  batch_size, std::chrono::milliseconds(timeout));
+
     if (count > 0) {
-        // Possibly wasting memory here
-        batch_object->batch_size = count;
+        auto batch_object = std::shared_ptr<Batch<DataType>>(new Batch<DataType>(count));
+        for(int i = 0; i < count; i++) {
+            batch_object->batch[i] = DataType(*thebatch[i].get());
+        }
 
         while (not(sent = this->output->try_enqueue_bulk(&batch_object, 1))) {
             std::this_thread::sleep_for(std::chrono::nanoseconds(100));
@@ -405,11 +434,20 @@ int BatchingWorkAdapter<DataType>::pump() {
 };
 
 // Example worker task
-json map_string_to_json(std::string s) {
-    return json::parse(s);
+json* map_string_to_json(std::string *s) {
+    auto j = new json(json::parse(*s));
+
+    //std::cout << typeid(j).name() << std::endl;
+    //std::cout << *j << std::endl;
+
+    return j;
 }
 
-json map_random_work_on_json_object(json j) {
+json* map_random_work_on_json_object(json *_j) {
+    json *__j = new json(*_j);
+    json j = *__j;
+
+
     j["some field"] = "some value";
     j["some list"] = {'a', 'b', 'c'};
     j["some dict"] = {{"thing1", 1},
@@ -430,13 +468,58 @@ json map_random_work_on_json_object(json j) {
         }
     }
 
-    return j;
+    return __j;
 }
 
-bool filter_random_drop(std::string d) {
+template<typename DataType>
+bool filter_random_drop(DataType *d) {
     return (std::rand() % 2 == 0);
 };
 
+template<typename DataType>
+DataType* map_random_trig_work(DataType *d) {
+    double MYPI = 3.14159265;
+    int how_many = std::rand() % 10000;
+    double random_angle_rads = MYPI * ((double) std::rand() / (double) RAND_MAX);
+
+    for (int i = 0; i < how_many;) {
+        random_angle_rads = tan(atan(random_angle_rads));
+
+        // Don't let GCC optimize us away
+        __asm__ __volatile__("inc %[Incr]" : [Incr] "+r"(i));
+    }
+
+    return new DataType(*d);
+}
+
+template<typename InputType, typename OutputType>
+std::tuple<OutputType**, unsigned int> exploder_duplicate(OutputType *d) {
+    int k = 10;
+    OutputType** out = new OutputType*[k];
+
+    for (int i = 0; i < k; i++) {
+        out[i] = new OutputType(*d);
+    }
+
+    return std::tuple(out, k);
+}
+
+template<typename DataType>
+std::tuple<DataType**, unsigned int> exploder_duplicate(DataType *d) {
+    int k = 10;
+    DataType** out = new DataType*[k];
+
+    for (int i = 0; i < k; i++) {
+        out[i] = new DataType(*d);
+    }
+
+    return std::tuple(out, k);
+}
+
+template<typename InputType>
+void sink_discard(InputType *) {
+    return;
+}
 
 struct TaskStats {
     unsigned int stage_type;
@@ -572,32 +655,56 @@ public:
     LinearLinkInfo<InputType, OutputType> add_stage(StageAdapter<InputType, OutputType> *adapter);
 
     template<class InputType, class OutputType>
-    LinearLinkInfo<InputType, OutputType> add_stage(std::function<OutputType(InputType)> map);
+    LinearLinkInfo<InputType, OutputType> add_stage(std::function<OutputType*(InputType*)> map);
 
     template<class InputType, class OutputType>
-    LinearLinkInfo<InputType, OutputType> add_stage(OutputType(*map)(InputType)) {
+    LinearLinkInfo<InputType, OutputType> add_stage(OutputType*(*map)(InputType*)) {
         return add_stage(std::function(map));
     };
 
     // Redundant, but for experimenting with terminology.
     template<class InputType, class OutputType>
-    LinearLinkInfo<InputType, OutputType> map(OutputType(*map)(InputType)) {
+    LinearLinkInfo<InputType, OutputType> map(OutputType*(*map)(InputType*)) {
         return add_stage(std::function(map));
     };
 
     // Redundant, but for experimenting with terminology.
     template<class DataType>
-    LinearLinkInfo<DataType, DataType>& filter(bool(*filter)(DataType)) {
-        return add_stage(new FilterAdapter<DataType>(std::function<bool(DataType)>(filter)));
+    LinearLinkInfo<DataType, DataType> filter(bool(*filter)(DataType *)) {
+        return add_stage(new FilterAdapter<DataType>(std::function<bool(DataType *)>(filter)));
+    };
+
+    template<class DataType>
+    LinearLinkInfo<DataType, Batch<DataType>> batch(
+            unsigned int batch_size, unsigned int timeout_ms) {
+        return add_stage(new BatchingWorkAdapter<DataType>(batch_size, timeout_ms));
+    };
+
+    template<class InputType, class OutputType>
+    LinearLinkInfo<InputType, OutputType> explode(
+            std::tuple<OutputType**, unsigned int>(*exploder)(InputType*)) {
+        return add_stage(new ExplodeAdapter<InputType, OutputType>(exploder));
     };
 
     LinearPipeline& add_conditional_stage(unsigned int (*cond_test)(LinearPipeline *));
 
     template<class SourceType, class OutputType>
-    LinearLinkInfo<SourceType, OutputType> set_source(std::string connection_string, unsigned int max_read_rate);
+    LinearLinkInfo<SourceType, OutputType> set_source(std::string connection_string,
+                                                      unsigned int max_read_rate);
 
     template<class InputType>
-    LinearLinkInfo<InputType, InputType> set_sink(SinkAdapter<InputType> *adapter);
+    LinearLinkInfo<InputType, InputType> set_sink(SinkAdapter<InputType> *sink_adapter);
+
+    template<class InputType>
+    LinearLinkInfo<InputType, InputType> set_sink(std::string connection_string,
+                                                  std::function<void(InputType*)> sink);
+
+    template<class InputType>
+    LinearLinkInfo<InputType, InputType> set_sink(std::string connection_string,
+                                                  void(*sink)(InputType*)) {
+        return set_sink(connection_string, std::function<void(InputType*)>(sink));
+    };
+
 
     void update_task_stats(unsigned int index, unsigned int processed, unsigned int queue_size) {
         auto cur_time = std::chrono::steady_clock::now();
@@ -667,8 +774,8 @@ LinearLinkInfo<InputType, OutputType> LinearPipeline::add_stage(StageAdapter<Inp
     stage_running_flags.push_back(run_flag);
 
     std::cout << "Adding stage (adapter constructor) " << index << std::endl;
-    std::shared_ptr <BlockingConcurrentQueue<InputType>> input =
-            std::static_pointer_cast < BlockingConcurrentQueue < InputType >> (edges[index - 1]);
+    std::shared_ptr <BlockingConcurrentQueue<std::shared_ptr<InputType>>> input =
+            std::static_pointer_cast<BlockingConcurrentQueue<std::shared_ptr<InputType>>> (edges[index - 1]);
 
     auto adapter = std::shared_ptr<StageAdapter<InputType, OutputType>>(stage_adapter);
     adapter->input = input;
@@ -703,14 +810,14 @@ LinearLinkInfo<InputType, OutputType> LinearPipeline::add_stage(StageAdapter<Inp
 }
 
 template<class InputType, class OutputType>
-LinearLinkInfo<InputType, OutputType> LinearPipeline::add_stage(std::function<OutputType(InputType)> map) {
+LinearLinkInfo<InputType, OutputType> LinearPipeline::add_stage(std::function<OutputType*(InputType*)> map) {
     std::atomic<unsigned int> *run_flag = new std::atomic<unsigned int>(0);
     auto index = stage_running_flags.size();
     stage_running_flags.push_back(run_flag);
 
     std::cout << "Adding stage " << index << std::endl;
-    std::shared_ptr <BlockingConcurrentQueue<InputType>> input =
-            std::static_pointer_cast < BlockingConcurrentQueue < InputType >> (edges[index - 1]);
+    std::shared_ptr <BlockingConcurrentQueue<std::shared_ptr<InputType>>> input =
+            std::static_pointer_cast<BlockingConcurrentQueue<std::shared_ptr<InputType>>> (edges[index - 1]);
 
     auto adapter = std::shared_ptr<StageAdapter<InputType, OutputType>>(
             new StageAdapter<InputType, OutputType>(map, input));
@@ -769,7 +876,9 @@ LinearLinkInfo<SourceType, OutputType> LinearPipeline::set_source(std::string co
 
             service_executor.async([&]() {
                 while (this->pipeline_running == 1) {
-                    adapter->pump();
+                    if (this->task_stats[index]->avg_throughput <= adapter->max_read_rate) {
+                        adapter->pump();
+                    }
                 }
                 this->stage_running_flags[index]->compare_exchange_strong(b, a);
             });
@@ -791,8 +900,8 @@ LinearLinkInfo<InputType, InputType> LinearPipeline::set_sink(SinkAdapter<InputT
     auto index = stage_running_flags.size();
     stage_running_flags.push_back(run_flag);
 
-    std::shared_ptr <BlockingConcurrentQueue<InputType>> input =
-            std::static_pointer_cast < BlockingConcurrentQueue < InputType >> (edges[index - 1]);
+    std::shared_ptr <BlockingConcurrentQueue<std::shared_ptr<InputType>>> input =
+            std::static_pointer_cast < BlockingConcurrentQueue<std::shared_ptr<InputType>>> (edges[index - 1]);
 
     sink_adapter->input = input;
     auto adapter = std::shared_ptr<SinkAdapter<InputType>>(sink_adapter);
@@ -826,43 +935,104 @@ LinearLinkInfo<InputType, InputType> LinearPipeline::set_sink(SinkAdapter<InputT
     return LinearLinkInfo<InputType, InputType>(*this);
 };
 
-// TODO: Hacky. just experimenting for improved function chaining
-template <class InputType, class OutputType>
+template<class InputType>
+LinearLinkInfo<InputType, InputType> LinearPipeline::set_sink(std::string connection_string,
+        std::function<void(InputType*)> sink) {
+    std::atomic<unsigned int> *run_flag = new std::atomic<unsigned int>(0);
+    auto index = stage_running_flags.size();
+    stage_running_flags.push_back(run_flag);
+
+    std::shared_ptr <BlockingConcurrentQueue<std::shared_ptr<InputType>>> input =
+            std::static_pointer_cast < BlockingConcurrentQueue<std::shared_ptr<InputType>>> (edges[index - 1]);
+
+    auto adapter = std::shared_ptr<SinkAdapter<InputType>>(
+            new SinkAdapter<InputType>(connection_string, sink, input));
+
+    stage_adapters.push_back(adapter);
+    task_stats.push_back(std::unique_ptr<TaskStats>(new TaskStats()));
+    task_stats[index]->last_visited = std::chrono::steady_clock::now();
+    task_stats[index]->stage_type = StageType::sink;
+
+    std::cout << "Adding pipeline sink" << std::endl;
+    tf::Task sink_task = pipeline.emplace([this, adapter, index]() {
+        unsigned int a = 0, b = 1;
+
+        if ((this->stage_running_flags[index])->compare_exchange_strong(a, b)) {
+            std::cout << "Initializing sink task." << std::endl;
+            adapter->init();
+
+            service_executor.async([&]() {
+                while (this->pipeline_running == 1) { adapter->pump(); }
+                this->stage_running_flags[index]->compare_exchange_strong(b, a);
+            });
+        }
+
+        update_task_stats(index, adapter->processed, adapter->queue_size());
+    }).name("sink");
+
+    id_to_task_map[index] = sink_task;
+    task_chain.push_back(sink_task);
+    task_chain[index - 1].precede(sink_task);
+
+    return LinearLinkInfo<InputType, InputType>(*this);
+};
+
+
+template <class SourceLinkInput, class LinkOutputType>
 class LinearLinkInfo {
 public:
     LinearPipeline &lp;
-    //std::shared_ptr <BlockingConcurrentQueue<OutputType>> link_output;
 
     LinearLinkInfo(LinearPipeline &lp) :
         lp{lp} {
     };
 
-    LinearLinkInfo<OutputType, OutputType> set_sink(SinkAdapter<OutputType> *adapter) {
+    LinearLinkInfo<LinkOutputType, LinkOutputType> set_sink(SinkAdapter<LinkOutputType> *adapter) {
         return lp.set_sink(adapter);
     }
 
+    LinearLinkInfo<LinkOutputType, LinkOutputType> set_sink(std::string connection_string,
+                                                    std::function<void(LinkOutputType*)> sink) {
+        return lp.set_sink(connection_string, sink);
+    }
+
+    LinearLinkInfo<LinkOutputType, LinkOutputType> set_sink(std::string connection_string,
+                                                    void(*sink)(LinkOutputType*)) {
+        return lp.set_sink(connection_string, sink);
+    }
+
     template<class NextType>
-    LinearLinkInfo<OutputType, NextType> add_stage(StageAdapter<OutputType, NextType> *adapter){
+    LinearLinkInfo<LinkOutputType, NextType> add_stage(StageAdapter<LinkOutputType, NextType> *adapter){
         return lp.add_stage(adapter);
     };
 
     template<class NextType>
-    LinearLinkInfo<OutputType, NextType> add_stage(std::function<NextType(OutputType)> map) {
+    LinearLinkInfo<LinkOutputType, NextType> add_stage(std::function<NextType*(LinkOutputType*)> map) {
         return lp.add_stage(map);
     };
 
     template<class NextType>
-    LinearLinkInfo<OutputType, NextType> add_stage(OutputType(*map)(InputType)) {
+    LinearLinkInfo<LinkOutputType, NextType> add_stage(LinkOutputType*(*map)(LinkOutputType*)) {
         return lp.add_stage(std::function(map));
     };
 
     template<class NextType>
-    LinearLinkInfo<OutputType, NextType> map(NextType(*map)(OutputType)) {
+    LinearLinkInfo<LinkOutputType, NextType> map(NextType*(*map)(LinkOutputType*)) {
         return lp.add_stage(std::function(map));
     };
 
-    LinearLinkInfo<OutputType, OutputType> filter(bool(*filter)(OutputType)) {
-        return lp.add_stage(new FilterAdapter<OutputType>(std::function<bool(OutputType)>(filter)));
+    LinearLinkInfo<LinkOutputType, LinkOutputType> filter(bool(*filter)(LinkOutputType*)) {
+        return lp.add_stage(new FilterAdapter<LinkOutputType>(std::function<bool(LinkOutputType *)>(filter)));
+    };
+
+    LinearLinkInfo<LinkOutputType, Batch<LinkOutputType>> batch(unsigned int batch_size, unsigned int timeout_ms) {
+        return lp.batch<LinkOutputType>(batch_size, timeout_ms);
+    }
+
+    template<class NextType>
+    LinearLinkInfo<LinkOutputType, NextType> explode(
+        std::tuple<NextType**, unsigned int>(*exploder)(LinkOutputType*)) {
+        return lp.explode(exploder);
     };
 
     LinearPipeline& add_conditional_stage(unsigned int (*cond_test)(LinearPipeline *)) {

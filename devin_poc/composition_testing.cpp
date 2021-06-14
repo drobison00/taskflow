@@ -37,22 +37,21 @@ int main(int argc, char **argv) {
     }
     int workers = 16;
 
-    using JsonBatchObject = std::shared_ptr<BatchObject<json>>;
     tf::Executor executor(workers);
     LinearPipeline lp(executor, true);
 
     lp.set_source<std::fstream, std::string>("devin_poc/without_data_len.json", rate_per_sec)
-     //.add_stage(new RandomDropFilter<std::string>()) same as .filter(filter_random_drop)
      .filter(filter_random_drop)
      .map(map_string_to_json)
+     .explode(exploder_duplicate<json>)
      .map(map_random_work_on_json_object)
-     .add_stage(new ReplicationSubDivideWorkAdapter<json, json>(10))
-     .add_stage(new RandomTrigWorkAdapter<json, json>())
-     .add_stage(new ReplicationSubDivideWorkAdapter<json, json>(10))
+     .explode(exploder_duplicate<json>)
+     .filter(filter_random_drop)
+     .map(map_random_trig_work<json>)
+     .explode(exploder_duplicate<json, json>)
      .map(map_random_work_on_json_object)
-     .add_stage(new BatchingWorkAdapter<json>())
-     .add_stage(new RandomDropFilter<JsonBatchObject>())
-     .set_sink(new DiscardSinkAdapter<JsonBatchObject>())
+     .batch(10, 10)
+     .set_sink(std::string(""), sink_discard)
      .add_conditional_stage(map_conditional_jump_to_start)
      .visualize("main_graph.dot")
      .start(timeout);
