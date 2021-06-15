@@ -69,5 +69,5 @@ The above command will initialize and run this example pipeline:
 It will also display basic stats.
 ```
 // shows avg_throughput(avg_queue_size)
-roughput msg/sec: [pumped] =>      19344(1007), [q.1] =>     9266(1007), [q.2] =>     9562(1022), [q.3] =>     9480(1021), [q.4] =>     9506(1018), [q.5] =>     9393(1004), [q.6] =>    47023(998), [q.7] =>    48155(1008), [q.8] =>    46864(880), [q.9] =>   485079(963), [cond]    runtime:        1 sec
+[Sourced] =>   1681(1007), [filter] =>    810(1007), [map] =>    847(1023), [explode] =>    745(1009), [map] =>   7626(1018), [map] =>   7721(1019), [explode] =>   7790(1005), [filter] =>  38435(999), [map] =>  38706(1009), [explode] =>  38890(987), [batch] => 397659(986), [sunk] =>  39981(  3), [cond],      0(  0),  runtime:   27 sec
 ```

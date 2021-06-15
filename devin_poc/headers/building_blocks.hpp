@@ -517,50 +517,37 @@ public:
                                 }
                                     break;
                                 case StageType::op_source: {
-                                    sstream << "[sourced]" << " => "
-                                            << std::setw(8) << std::setprecision(0) << std::fixed <<
-                                            this->task_stats[i]->avg_throughput << "(" <<
-                                            this->task_stats[i]->avg_queue_size << "), ";
+                                    sstream << "[sourced]" << " => ";
                                 }
                                     break;
                                 case StageType::op_sink: {
-                                    sstream << "[sunk]" << " => "
-                                            << std::setw(8) << std::setprecision(0) << std::fixed <<
-                                            this->task_stats[i]->avg_throughput << "(" <<
-                                            this->task_stats[i]->avg_queue_size << "), ";
+                                    sstream << "[sunk]" << " => ";
                                 }
                                     break;
                                 case StageType::op_map: {
-                                    sstream << "[map]" << " => "
-                                            << std::setw(8) << std::setprecision(0) << std::fixed <<
-                                            this->task_stats[i]->avg_throughput << "(" <<
-                                            this->task_stats[i]->avg_queue_size << "), ";
+                                    sstream << "[map]" << " => ";
                                 }
                                     break;
                                 case StageType::op_filter: {
-                                    sstream << "[filter]" << " => "
-                                            << std::setw(8) << std::setprecision(0) << std::fixed <<
-                                            this->task_stats[i]->avg_throughput << "(" <<
-                                            this->task_stats[i]->avg_queue_size << "), ";
+                                    sstream << "[filter]" << " => ";
                                 }
                                     break;
                                 case StageType::op_explode: {
-                                    sstream << "[explode]" << " => "
-                                            << std::setw(8) << std::setprecision(0) << std::fixed <<
-                                            this->task_stats[i]->avg_throughput << "(" <<
-                                            this->task_stats[i]->avg_queue_size << "), ";
+                                    sstream << "[explode]" << " => ";
                                 }
                                     break;
                                 case StageType::op_batch: {
-                                    sstream << "[batch]" << " => "
-                                            << std::setw(8) << std::setprecision(0) << std::fixed <<
-                                            this->task_stats[i]->avg_throughput << "(" <<
-                                            this->task_stats[i]->avg_queue_size << "), ";
+                                    sstream << "[batch]" << " => ";
                                 }
                                     break;
                             }
+                            sstream << std::setw(6) << std::setprecision(0) << std::fixed <<
+                                    this->task_stats[i]->avg_throughput << "(" <<
+                                    std::setw(3) << std::setprecision(0) << std::fixed <<
+                                    this->task_stats[i]->avg_queue_size << "), ";
                         }
-                        sstream << " runtime: " << std::setw(8) << elapsed.count() << " sec\r";
+
+                        sstream << " runtime: " << std::setw(4) << elapsed.count() << " sec\r";
                         std::cout << sstream.str() << std::flush;
                     }
                 });
