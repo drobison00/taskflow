@@ -2,6 +2,7 @@
 
 Composition workflow/testing
 
+Note: definitely a work in progress, currently meant for discussion and design review.
 
 The current LinearPipeline architecture is designed as a series of taskflow tasks:
 - Tasks communicate work through the pipeline asynchronously via concurrent queues.
@@ -15,19 +16,19 @@ The current LinearPipeline architecture is designed as a series of taskflow task
 - The pipeline currently supports 6 primary operations and implements a function chaining pattern to build up a pipeline.
   source should be first (no checking for this currently).
     - Operations:
-        - set_source - currently only supports a hacked 'read once' from a file and inject at line rate operation.
-        - filter - signature: filter(bool(*myfunc)(InputType*)). The function takes in a 
+        - **set\_source** - HACKY - currently only supports a hacked 'read once' from a file and inject at line rate operation.
+        - **filter** - signature: filter(bool(\*myfunc)(InputType\*)). The function takes in a 
           pointer to a data element of type InputType, and returns 'true' if we keep the item and 'false' if we don't.
-        - map - signature: map(OutputType*(*myfunc)(InputType*)). The function will receive 
+        - **map** - signature: map(OutputType*(\*myfunc)(InputType\*)). The function will receive 
           a pointer to a data element of type InputType, and must return a NEW function pointer of type OutputType. 
-        - explode - signature: explode(std::tuple<DataType **, unsigned int>(*myfunc)(OutputType*)) - Takes in a data element of
+        - **explode** - signature: explode(std::tuple<DataType \*\*, unsigned int>(\*myfunc)(OutputType\*)) - Takes in a data element of
           type InputType* and must return a tuple containing an array of pointers to new OutputTypes, and the number of
           items created.
-        - batch - signature batch(max_batch_size, timeout), collects up to max_batch_size elements, or less if 'timeout'
+        - **batch** - signature batch(max_batch_size, timeout), collects up to max_batch_size elements, or less if 'timeout'
           and places a Batch<InputType>* object on its output queue.
           NOTE: If you add a batch function to the pipeline, subsequent maps/filters etc.. should expect to operate on a 
           Batch object.
-        - set_sink - signature(std::string connection_string, void(*myfunc)(InputType*)) - will receive a pointer to its input
+        - **set_sink** - signature(std::string connection_string, void(\*myfunc)(InputType\*)) - will receive a pointer to its input
           data, and can do whatever is required to retire it from the pipeline; however, the data itself will be freed as soon as
           myfunc returns, so the pointer should not be stored or passed to another function.
 
