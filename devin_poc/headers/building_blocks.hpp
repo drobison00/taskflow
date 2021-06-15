@@ -463,10 +463,11 @@ struct TaskStats {
 
 
 class LinearPipeline {
-    enum StageType {
-        source, intermediate, sink, conditional
-    };
 public:
+    enum StageType {
+        op_custom, op_source, op_sink, op_filter, op_map, op_batch, op_explode, op_conditional
+    };
+
     unsigned int stages = 0;
     bool print_stats = false;
 
@@ -509,29 +510,55 @@ public:
                         std::chrono::duration<double> elapsed = cur_time - start_time;
 
                         sstream.str("");
-                        sstream << "Throughput msg/sec: ";
                         for (auto i = 0; i < this->task_stats.size(); i++) {
                             switch (this->task_stats[i]->stage_type) {
-                                case StageType::conditional: {
+                                case StageType::op_conditional: {
                                     sstream << "[cond], ";
-                                    break;
                                 }
-                                case StageType::source: {
-                                    sstream << "[pumped]" << " => "
-                                            << std::setw(10) << std::setprecision(0) << std::fixed <<
-                                            this->task_stats[i]->avg_throughput << "(" <<
-                                            this->task_stats[i]->avg_queue_size << "), ";
                                     break;
-                                }
-
-                                default: {
-                                    sstream << "[q." << i << "] => "
+                                case StageType::op_source: {
+                                    sstream << "[sourced]" << " => "
                                             << std::setw(8) << std::setprecision(0) << std::fixed <<
                                             this->task_stats[i]->avg_throughput << "(" <<
                                             this->task_stats[i]->avg_queue_size << "), ";
                                 }
+                                    break;
+                                case StageType::op_sink: {
+                                    sstream << "[sunk]" << " => "
+                                            << std::setw(8) << std::setprecision(0) << std::fixed <<
+                                            this->task_stats[i]->avg_throughput << "(" <<
+                                            this->task_stats[i]->avg_queue_size << "), ";
+                                }
+                                    break;
+                                case StageType::op_map: {
+                                    sstream << "[map]" << " => "
+                                            << std::setw(8) << std::setprecision(0) << std::fixed <<
+                                            this->task_stats[i]->avg_throughput << "(" <<
+                                            this->task_stats[i]->avg_queue_size << "), ";
+                                }
+                                    break;
+                                case StageType::op_filter: {
+                                    sstream << "[filter]" << " => "
+                                            << std::setw(8) << std::setprecision(0) << std::fixed <<
+                                            this->task_stats[i]->avg_throughput << "(" <<
+                                            this->task_stats[i]->avg_queue_size << "), ";
+                                }
+                                    break;
+                                case StageType::op_explode: {
+                                    sstream << "[explode]" << " => "
+                                            << std::setw(8) << std::setprecision(0) << std::fixed <<
+                                            this->task_stats[i]->avg_throughput << "(" <<
+                                            this->task_stats[i]->avg_queue_size << "), ";
+                                }
+                                    break;
+                                case StageType::op_batch: {
+                                    sstream << "[batch]" << " => "
+                                            << std::setw(8) << std::setprecision(0) << std::fixed <<
+                                            this->task_stats[i]->avg_throughput << "(" <<
+                                            this->task_stats[i]->avg_queue_size << "), ";
+                                }
+                                    break;
                             }
-
                         }
                         sstream << " runtime: " << std::setw(8) << elapsed.count() << " sec\r";
                         std::cout << sstream.str() << std::flush;
@@ -575,28 +602,32 @@ public:
     }
 
     template<class InputType, class OutputType>
-    LinearLinkInfo<InputType, OutputType> add_stage(StageAdapter<InputType, OutputType> *adapter);
+    LinearLinkInfo<InputType, OutputType> add_stage(StageAdapter<InputType, OutputType> *adapter, StageType type);
 
     template<class InputType, class OutputType>
     LinearLinkInfo<InputType, OutputType> map(OutputType *(*map)(InputType *)) {
-        return add_stage(new MapAdapter<InputType, OutputType>(std::function<OutputType*(InputType*)>(map)));
+        return add_stage(new MapAdapter<InputType, OutputType>(std::function<OutputType*(InputType*)>(map)),
+                StageType::op_map);
     };
 
     template<class DataType>
     LinearLinkInfo<DataType, DataType> filter(bool(*filter)(DataType *)) {
-        return add_stage(new FilterAdapter<DataType>(std::function<bool(DataType *)>(filter)));
+        return add_stage(new FilterAdapter<DataType>(std::function<bool(DataType *)>(filter)),
+                StageType::op_filter);
     };
 
     template<class DataType>
     LinearLinkInfo<DataType, Batch<DataType>> batch(
             unsigned int batch_size, unsigned int timeout_ms) {
-        return add_stage(new BatchAdapter<DataType>(batch_size, timeout_ms));
+        return add_stage(new BatchAdapter<DataType>(batch_size, timeout_ms),
+                StageType::op_batch);
     };
 
     template<class InputType, class OutputType>
     LinearLinkInfo<InputType, OutputType> explode(
             std::tuple<OutputType **, unsigned int>(*exploder)(InputType *)) {
-        return add_stage(new ExplodeAdapter<InputType, OutputType>(exploder));
+        return add_stage(new ExplodeAdapter<InputType, OutputType>(exploder),
+                StageType::op_explode);
     };
 
     LinearPipeline &add_conditional_stage(unsigned int (*cond_test)(LinearPipeline *));
@@ -660,10 +691,9 @@ public:
 LinearPipeline &LinearPipeline::add_conditional_stage(unsigned int (*cond_test)(LinearPipeline *)) {
     // TODO: this is entirely ad-hoc right now. It exists only as a way to add the jump to start
     // conditional. Still thinking through the architecture requirements to generalize.
-    auto index = edges.size();
-
+    auto index = stages++;
     task_stats.push_back(std::unique_ptr<TaskStats>(new TaskStats()));
-    task_stats[index]->stage_type = StageType::conditional;
+    task_stats[index]->stage_type = StageType::op_conditional;
     std::cout << "Adding conditional at " << index << std::endl;
 
     tf::Task conditional = pipeline.emplace([this, cond_test]() {
@@ -680,9 +710,9 @@ LinearPipeline &LinearPipeline::add_conditional_stage(unsigned int (*cond_test)(
 
 template<class InputType, class OutputType>
 LinearLinkInfo<InputType, OutputType> LinearPipeline::add_stage(StageAdapter<InputType,
-                                                                OutputType> *stage_adapter) {
-    auto index = edges.size();
-
+                                                                OutputType> *stage_adapter,
+                                                                StageType type) {
+    auto index = stages++;
     std::cout << "Adding stage (adapter constructor) " << index << std::endl;
     std::shared_ptr < BlockingConcurrentQueue < std::shared_ptr < InputType>>> input =
                                                                                        std::static_pointer_cast <
@@ -696,7 +726,7 @@ LinearLinkInfo<InputType, OutputType> LinearPipeline::add_stage(StageAdapter<Inp
     edges.push_back(adapter->get_output_edge());
     task_stats.push_back(std::unique_ptr<TaskStats>(new TaskStats()));
     task_stats[index]->last_visited = std::chrono::steady_clock::now();
-    task_stats[index]->stage_type = StageType::intermediate;
+    task_stats[index]->stage_type = type;
 
     tf::Task stage_task = pipeline.emplace([this, index, adapter]() {
         unsigned int a = 0, b = 1;
@@ -724,15 +754,14 @@ LinearLinkInfo<InputType, OutputType> LinearPipeline::add_stage(StageAdapter<Inp
 template<class SourceType, class OutputType>
 LinearLinkInfo<SourceType, OutputType> LinearPipeline::set_source(std::string connection_string,
                                                                   unsigned int max_read_rate) {
-    auto index = edges.size();
-
+    auto index = stages++;
     auto adapter = std::shared_ptr<SourceAdapter<SourceType, OutputType>>(
             new SourceAdapter<SourceType, OutputType>(connection_string, max_read_rate));
 
     edges.push_back(adapter->get_output_edge());
     task_stats.push_back(std::unique_ptr<TaskStats>(new TaskStats()));
     task_stats[index]->last_visited = std::chrono::steady_clock::now();
-    task_stats[index]->stage_type = StageType::source;
+    task_stats[index]->stage_type = StageType::op_source;
 
     std::cout << "Adding pipeline source" << std::endl;
     tf::Task source_task = pipeline.emplace([this, adapter, index]() {
@@ -755,6 +784,7 @@ LinearLinkInfo<SourceType, OutputType> LinearPipeline::set_source(std::string co
         update_task_stats(index, adapter->processed, adapter->queue_size());
     }).name("source");
 
+    this->init = init;
     id_to_task_map[index] = source_task;
     task_chain.push_back(source_task);
     init.precede(source_task);
@@ -764,8 +794,7 @@ LinearLinkInfo<SourceType, OutputType> LinearPipeline::set_source(std::string co
 
 template<class InputType>
 LinearLinkInfo<InputType, InputType> LinearPipeline::set_sink(SinkAdapter<InputType> *sink_adapter) {
-    auto index = edges.size();
-
+    auto index = stages++;
     std::shared_ptr < BlockingConcurrentQueue < std::shared_ptr < InputType>>> input =
                                                                                        std::static_pointer_cast <
                                                                                        BlockingConcurrentQueue <
@@ -777,7 +806,7 @@ LinearLinkInfo<InputType, InputType> LinearPipeline::set_sink(SinkAdapter<InputT
 
     task_stats.push_back(std::unique_ptr<TaskStats>(new TaskStats()));
     task_stats[index]->last_visited = std::chrono::steady_clock::now();
-    task_stats[index]->stage_type = StageType::sink;
+    task_stats[index]->stage_type = StageType::op_sink;
 
     std::cout << "Adding pipeline sink" << std::endl;
     tf::Task sink_task = pipeline.emplace([this, adapter, index]() {
@@ -813,32 +842,31 @@ public:
     };
 
     LinearLinkInfo<LinkOutputType, LinkOutputType> set_sink(SinkAdapter<LinkOutputType> *adapter) {
-        return lp.set_sink(adapter);
+        return lp.set_sink<LinkOutputType>(adapter);
     }
 
     LinearLinkInfo<LinkOutputType, LinkOutputType> set_sink(std::string connection_string,
                                                             std::function<void(LinkOutputType *)> sink) {
-        return lp.set_sink(connection_string, sink);
+        return lp.set_sink<LinkOutputType>(connection_string, sink);
     }
 
     LinearLinkInfo<LinkOutputType, LinkOutputType> set_sink(std::string connection_string,
                                                             void(*sink)(LinkOutputType *)) {
-        return lp.set_sink(connection_string, sink);
+        return lp.set_sink<LinkOutputType>(connection_string, sink);
     }
 
     template<class NextType>
     LinearLinkInfo<LinkOutputType, NextType> add_stage(StageAdapter<LinkOutputType, NextType> *adapter) {
-        return lp.add_stage(adapter);
+        return lp.add_stage<LinkOutputType, NextType>(adapter);
     };
 
     template<class NextType>
     LinearLinkInfo<LinkOutputType, NextType> map(NextType *(*map)(LinkOutputType *)) {
-        return lp.map(map);
+        return lp.map<LinkOutputType, NextType>(map);
     };
 
     LinearLinkInfo<LinkOutputType, LinkOutputType> filter(bool(*filter)(LinkOutputType *)) {
-        //return lp.add_stage(new FilterAdapter<LinkOutputType>(std::function<bool(LinkOutputType *)>(filter)));
-        return lp.filter(filter);
+        return lp.filter<LinkOutputType>(filter);
     };
 
     LinearLinkInfo<LinkOutputType, Batch<LinkOutputType>> batch(unsigned int batch_size, unsigned int timeout_ms) {
@@ -848,7 +876,7 @@ public:
     template<class NextType>
     LinearLinkInfo<LinkOutputType, NextType> explode(
             std::tuple<NextType **, unsigned int>(*exploder)(LinkOutputType *)) {
-        return lp.explode(exploder);
+        return lp.explode<LinkOutputType, NextType>(exploder);
     };
 
     LinearPipeline &add_conditional_stage(unsigned int (*cond_test)(LinearPipeline *)) {
