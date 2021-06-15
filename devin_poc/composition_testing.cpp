@@ -40,7 +40,7 @@ int main(int argc, char **argv) {
     tf::Executor executor(workers);
     LinearPipeline lp(executor, true);
 
-    lp.set_source<std::fstream, std::string>("devin_poc/without_data_len.json", rate_per_sec)
+    lp.set_source<std::fstream, std::string>(std::string("devin_poc/without_data_len.json"), rate_per_sec)
      .filter(filter_random_drop)                // Randomly drop 50% of packets
      .map(map_string_to_json)                   // Parse strings into JSON objects
      .map(map_random_work_on_json_object)       // Perform various operations on each JSON object
