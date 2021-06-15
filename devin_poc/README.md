@@ -19,7 +19,8 @@ The current LinearPipeline architecture is designed as a series of taskflow task
 - The pipeline currently supports 6 primary operations and implements a function chaining pattern to build up a pipeline.
   source should be first (no checking for this currently).
     - Operations:
-        - **set\_source** - HACKY - currently only supports a hacked 'read once' from a file and inject at line rate operation.
+        - **source** - HACKY - currently only supports a hacked 'read once' from a file and inject at line rate operation.
+          TODO: Need to define a better way to initialize source adpaters.
         - **filter** - signature: filter(bool(\*myfunc)(InputType\*)). The function takes in a 
           pointer to a data element of type InputType, and returns 'true' if we keep the item and 'false' if we don't.
         - **map** - signature: map(OutputType*(\*myfunc)(InputType\*)). The function will receive 
@@ -31,9 +32,10 @@ The current LinearPipeline architecture is designed as a series of taskflow task
           and places a Batch<InputType>* object on its output queue.
           NOTE: If you add a batch function to the pipeline, subsequent maps/filters etc.. should expect to operate on a 
           Batch object.
-        - **set_sink** - signature(std::string connection_string, void(\*myfunc)(InputType\*)) - will receive a pointer to its input
+        - **sink** - signature(void(\*myfunc)(InputType\*)) - will receive a pointer to its input
           data, and can do whatever is required to retire it from the pipeline; however, the data itself will be freed as soon as
           myfunc returns, so the pointer should not be stored or passed to another function.
+          TODO: Need to define a better way to initialize sink adpaters.
 
 ```
 g++ -g -std=c++17 devin_poc/composition_testing.cpp -I ./ -I ../json/include -I ../concurrentqueue -I devin_poc/headers/ -O2 -pthread -o taskflow_test
@@ -50,7 +52,7 @@ The above command will initialize and run this example pipeline:
     tf::Executor executor(workers);
     LinearPipeline lp(executor, true);
 
-    lp.set_source<std::fstream, std::string>(std::string("devin_poc/without_data_len.json"), rate_per_sec)
+    lp.source(new FileSourceAdapter(std::string("devin_poc/without_data_len.json"), rate_per_sec))
         .filter(filter_random_drop)                // Randomly drop 50% of packets
         .map(map_string_to_json)                   // Parse strings into JSON objects
         .explode<json>(exploder_duplicate)         // Duplicated every JSON object 10x
@@ -61,10 +63,10 @@ The above command will initialize and run this example pipeline:
         .map<json>(map_random_trig_work)           // Do intensive trig work and forward JSON packets
         .explode<json>(exploder_duplicate)         // Duplicated every JSON object 10x
         .batch(10, 10)                             // Batch 10 JSON objects at a time and forward
-        .set_sink(std::string(""), sink_discard)   // Sink all packets
+        .sink(sink_discard)   // Sink all packets
         .add_conditional_stage(map_conditional_jump_to_start) // Taskflow loopback
         .visualize("main_graph.dot")
-        .start(timeout)
+        .start(timeout);
 ```
 It will also display basic stats.
 ```
