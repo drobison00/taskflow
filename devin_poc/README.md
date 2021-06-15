@@ -8,17 +8,28 @@ The current LinearPipeline architecture is designed as a series of taskflow task
 - Each queue has a single writer (its task) and a single reader (its consuming task)
 - Pipeline semantics are based, loosely, around a functional work flow, where each stage takes in the data it operates
    on and emits new data. There are likely optimizations to be made here, such as with filtering or map operations that
-   produce a single output that is of the same type as the input; however, its pretty quick in its current state, and
+   produce a single output that is of the same type as the input; however, its pretty fast in its current state, and
    straight forward to reason about.
+- Back-pressure is handled in a straight forward fashion using fixed queue sizes. If a tasks output queue is full, the
+  task will wait until it is able to push to it.
 - The pipeline currently supports 6 primary operations and implements a function chaining pattern to build up a pipeline.
   source should be first (no checking for this currently).
     - Operations:
-        - set_source:
-        - filter:
-        - map 
-        - explode
-        - batch
-        - set_sink
+        - set_source - currently only supports a hacked 'read once' from a file and inject at line rate operation.
+        - filter - signature: filter(bool(*myfunc)(InputType*)). The function takes in a 
+          pointer to a data element of type InputType, and returns 'true' if we keep the item and 'false' if we don't.
+        - map - signature: map(OutputType*(*myfunc)(InputType*)). The function will receive 
+          a pointer to a data element of type InputType, and must return a NEW function pointer of type OutputType. 
+        - explode - signature: explode(std::tuple<DataType **, unsigned int>(*myfunc)(OutputType*)) - Takes in a data element of
+          type InputType* and must return a tuple containing an array of pointers to new OutputTypes, and the number of
+          items created.
+        - batch - signature batch(max_batch_size, timeout), collects up to max_batch_size elements, or less if 'timeout'
+          and places a Batch<InputType>* object on its output queue.
+          NOTE: If you add a batch function to the pipeline, subsequent maps/filters etc.. should expect to operate on a 
+          Batch object.
+        - set_sink - signature(std::string connection_string, void(*myfunc)(InputType*)) - will receive a pointer to its input
+          data, and can do whatever is required to retire it from the pipeline; however, the data itself will be freed as soon as
+          myfunc returns, so the pointer should not be stored or passed to another function.
 
 ```
 g++ -g -std=c++17 devin_poc/composition_testing.cpp -I ./ -I ../json/include -I ../concurrentqueue -I devin_poc/headers/ -O2 -pthread -o taskflow_test
