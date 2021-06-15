@@ -8,9 +8,12 @@ The current LinearPipeline architecture is designed as a series of taskflow task
 - Tasks communicate work through the pipeline asynchronously via concurrent queues.
 - Each queue has a single writer (its task) and a single reader (its consuming task)
 - Pipeline semantics are based, loosely, around a functional work flow, where each stage takes in the data it operates
-   on and emits new data. There are likely optimizations to be made here, such as with filtering or map operations that
-   produce a single output that is of the same type as the input; however, its pretty fast in its current state, and
-   straight forward to reason about.
+   on and emits new data, except filter and batch operations. The 'filter' adapter, which is guaranteed 
+   to output exactly the same data type, unchanged, simply removes the data pointer from its input queue and passes
+   it to its output queue; the 'batch' adapter is slightly different, in that it emits a newly allocated 'Batch'
+   object containing elements of the same data type, unchanged, it copies up to N data pointers from its input queue
+   wraps them with the batch object, and emits the batch. Its pretty fast in its current state, and straight 
+   forward to reason about.
 - Back-pressure is handled in a straight forward fashion using fixed queue sizes. If a tasks output queue is full, the
   task will wait until it is able to push to it.
 - The pipeline currently supports 6 primary operations and implements a function chaining pattern to build up a pipeline.

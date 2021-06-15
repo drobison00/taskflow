@@ -346,7 +346,6 @@ int BatchAdapter<DataType>::pump() {
 
     this->read_count = this->input->wait_dequeue_bulk_timed(&thebatch[0],
                                                  batch_size, std::chrono::milliseconds(timeout));
-
     if (this->read_count > 0) {
         auto batch_object = std::shared_ptr<Batch<DataType>>(new Batch<DataType>(this->read_count));
         for (int i = 0; i < this->read_count; i++) {
