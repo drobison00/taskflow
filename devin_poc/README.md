@@ -63,7 +63,7 @@ The above command will initialize and run this example pipeline:
         .map<json>(map_random_trig_work)           // Do intensive trig work and forward JSON packets
         .explode<json>(exploder_duplicate)         // Duplicated every JSON object 10x
         .batch(10, 10)                             // Batch 10 JSON objects at a time and forward
-        .sink(sink_discard)   // Sink all packets
+        .sink(sink_discard)                        // Sink all packets
         .add_conditional_stage(map_conditional_jump_to_start) // Taskflow loopback
         .visualize("main_graph.dot")
         .start(timeout);

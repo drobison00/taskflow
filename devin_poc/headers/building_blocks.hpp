@@ -12,6 +12,44 @@
 using namespace moodycamel;
 using namespace nlohmann;
 
+template<typename T>
+constexpr auto type_name()
+
+noexcept {
+std::string_view name = "Error: unsupported compiler", prefix, suffix;
+#ifdef __clang__
+name = __PRETTY_FUNCTION__;
+  prefix = "auto type_name() [T = ";
+  suffix = "]";
+#elif defined(__GNUC__)
+name = __PRETTY_FUNCTION__;
+  prefix = "constexpr auto type_name() [with T = ";
+  suffix = "]";
+#elif defined(_MSC_VER)
+name = __FUNCSIG__;
+  prefix = "auto __cdecl type_name<";
+  suffix = ">(void) noexcept";
+#endif
+name.
+remove_prefix(prefix
+.
+
+size()
+
+);
+name.
+remove_suffix(suffix
+.
+
+size()
+
+);
+return
+name;
+};
+
+
+class PipelineStageConstructor;
 
 class LinearPipeline;
 
@@ -40,7 +78,9 @@ public:
     ~StageAdapterBase() = default;
 
     virtual void init() = 0;
+
     virtual void pump() = 0;
+
     virtual unsigned int queue_size() = 0;
 };
 
@@ -72,7 +112,7 @@ public:
     };
 
     StageAdapter(bool create_queue) {
-        if (create_queue){
+        if (create_queue) {
             output = OutputQueue(new OutputQueueType(max_queue_size));
         }
     };
@@ -94,7 +134,7 @@ public:
     }
 };
 
-class FileSourceAdapter: public StageAdapter<void, std::string> {
+class FileSourceAdapter : public StageAdapter<void, std::string> {
 public:
     unsigned int max_read_rate;
     std::string connection_string;
@@ -106,7 +146,9 @@ public:
             StageAdapter<void, std::string>() {};
 
     void init() override;
+
     void pump() override;
+
     unsigned int queue_size() override {
         return this->output->size_approx();
     };
@@ -124,7 +166,7 @@ void FileSourceAdapter::pump() {
     //std::string data;
     //std::getline(source, data);
 
-    this->output_buffer = std::shared_ptr <std::string>(new std::string(data_debug));
+    this->output_buffer = std::shared_ptr<std::string>(new std::string(data_debug));
     while (this->running == 1 && not(this->output->try_enqueue_bulk(&this->output_buffer, 1))) {
         std::this_thread::sleep_for(std::chrono::nanoseconds(100));
     }
@@ -133,7 +175,7 @@ void FileSourceAdapter::pump() {
 };
 
 template<class InputType>
-class DiscardSinkAdapter : public StageAdapter<InputType, void>{
+class DiscardSinkAdapter : public StageAdapter<InputType, void> {
 public:
     using InputQueue = std::shared_ptr <BlockingConcurrentQueue<std::shared_ptr < InputType>>>;
 
@@ -160,8 +202,8 @@ void DiscardSinkAdapter<InputType>::init() {
 template<class InputType>
 void DiscardSinkAdapter<InputType>::pump() {
     this->read_count = this->input->wait_dequeue_bulk_timed(&this->input_buffer,
-                                                      this->input_buffer_size, std::chrono::milliseconds(10));
-    if (this->read_count> 0) {
+                                                            this->input_buffer_size, std::chrono::milliseconds(10));
+    if (this->read_count > 0) {
         sink(this->input_buffer.get());
         this->processed += 1;
     }
@@ -177,6 +219,8 @@ public:
 
     MapSignature map;
 
+    MapAdapter() : StageAdapter<InputType, OutputType>() {};
+
     MapAdapter(MapSignature map) :
             map{map}, StageAdapter<InputType, OutputType>() {};
 
@@ -189,7 +233,7 @@ public:
 template<class InputType, class OutputType>
 void MapAdapter<InputType, OutputType>::pump() {
     this->read_count = this->input->wait_dequeue_bulk_timed(&this->input_buffer,
-                                                this->input_buffer_size, std::chrono::milliseconds(10));
+                                                            this->input_buffer_size, std::chrono::milliseconds(10));
     if (this->read_count > 0) {
         this->output_buffer = std::shared_ptr<OutputType>(map(this->input_buffer.get()));
         while (this->running == 1 &&
@@ -221,11 +265,11 @@ public:
 template<class DataType>
 void FilterAdapter<DataType>::pump() {
     this->read_count = this->input->wait_dequeue_bulk_timed(&this->input_buffer,
-                                                 this->input_buffer_size, std::chrono::milliseconds(10));
+                                                            this->input_buffer_size, std::chrono::milliseconds(10));
     if (this->read_count > 0) {
         if (this->filter(this->input_buffer.get())) {
             while (this->running == 1 &&
-                not(this->output->try_enqueue_bulk(&this->input_buffer, this->output_buffer_size))) {
+                   not(this->output->try_enqueue_bulk(&this->input_buffer, this->output_buffer_size))) {
                 std::this_thread::sleep_for(std::chrono::nanoseconds(100));
             };
             this->processed += 1;
@@ -259,7 +303,8 @@ void ExplodeAdapter<InputType, OutputType>::pump() {
 
     //TODO: use base class buffer vars better.
 
-    this->read_count = this->input->wait_dequeue_bulk_timed(&this->input_buffer, this->input_buffer_size, std::chrono::milliseconds(10));
+    this->read_count = this->input->wait_dequeue_bulk_timed(&this->input_buffer, this->input_buffer_size,
+                                                            std::chrono::milliseconds(10));
     if (this->read_count > 0) {
         std::tie(out, buffer_sz) = exploder(this->input_buffer.get());
         std::shared_ptr <OutputType> buffer_out[buffer_sz];
@@ -295,7 +340,7 @@ void BatchAdapter<DataType>::pump() {
     std::shared_ptr <DataType> thebatch[batch_size];
 
     this->read_count = this->input->wait_dequeue_bulk_timed(&thebatch[0],
-                                                 batch_size, std::chrono::milliseconds(timeout));
+                                                            batch_size, std::chrono::milliseconds(timeout));
     if (this->read_count > 0) {
         auto batch_object = std::shared_ptr<Batch<DataType>>(new Batch<DataType>(this->read_count));
         for (int i = 0; i < this->read_count; i++) {
@@ -343,6 +388,8 @@ json *map_random_work_on_json_object(json *_j) {
     return __j;
 }
 
+// Function examples
+
 template<typename DataType>
 bool filter_random_drop(DataType *d) {
     return (std::rand() % 2 == 0);
@@ -362,6 +409,22 @@ DataType *map_random_trig_work(DataType *d) {
     }
 
     return new DataType(*d);
+}
+
+template<>
+json *map_random_trig_work(json *d) {
+    double MYPI = 3.14159265;
+    int how_many = std::rand() % 100000;
+    double random_angle_rads = MYPI * ((double) std::rand() / (double) RAND_MAX);
+
+    for (int i = 0; i < how_many;) {
+        random_angle_rads = tan(atan(random_angle_rads));
+
+        // Don't let GCC optimize us away
+        __asm__ __volatile__("inc %[Incr]" : [Incr] "+r"(i));
+    }
+
+    return new json();
 }
 
 template<typename InputType, typename OutputType>
@@ -415,24 +478,36 @@ public:
     enum StageType {
         op_custom, op_source, op_sink, op_filter, op_map, op_batch, op_explode, op_conditional
     };
+    std::map <std::string, StageType> typename_to_stagetype;
 
     unsigned int stages = 0;
     bool print_stats = false;
 
+    json blueprint = {
+            {
+                    "pipeline", {
+                                        {"type", "linear"},
+                                        {"stages", json::array()}
+                                }
+            }
+    };
     std::atomic<unsigned int> pipeline_running = 0;
     std::vector <std::shared_ptr<void>> edges;
     std::vector <std::unique_ptr<TaskStats>> task_stats;
     std::map<unsigned int, tf::Task> id_to_task_map;
     std::vector <tf::Task> task_chain;
 
+    PipelineStageConstructor *psc;
     tf::Task init, start_task, end;
     tf::Taskflow pipeline;
     tf::Executor &service_executor;
 
     ~LinearPipeline() {};
 
-    LinearPipeline(tf::Executor &executor) : service_executor{executor} {
-        init = pipeline.emplace([this]() {
+    LinearPipeline(tf::Executor &executor, PipelineStageConstructor *psc) :
+            psc{psc}, service_executor{executor} {
+
+        init = pipeline.emplace([]() {
             //std::cout << "Initializing Pipeline" << std::endl;
         });
 
@@ -441,8 +516,9 @@ public:
         });
     }
 
-    LinearPipeline(tf::Executor &executor, bool print_stats) :
-            service_executor{executor}, print_stats{print_stats} {
+    LinearPipeline(tf::Executor &executor, PipelineStageConstructor *psc, bool print_stats) :
+            psc{psc}, service_executor{executor}, print_stats{print_stats} {
+
         init = pipeline.emplace([this]() {
             //std::cout << "Initializing Pipeline" << std::endl;
 
@@ -537,6 +613,14 @@ public:
         return *this;
     }
 
+    LinearPipeline &add_stage_by_name(std::string adapter_type,
+                                      std::string input_type,
+                                      std::string output_type) {
+
+
+        return *this;
+    }
+
     template<class InputType, class OutputType>
     LinearLinkInfo<InputType, OutputType> add_stage(StageAdapter<InputType, OutputType> *adapter, StageType type);
 
@@ -549,33 +633,33 @@ public:
     template<class InputType>
     LinearLinkInfo<InputType, void> sink(void(*sink)(InputType *)) {
         //TODO: init framework
-        return add_stage(new DiscardSinkAdapter<InputType>(std::string(""),sink), StageType::op_sink);
+        return add_stage(new DiscardSinkAdapter<InputType>(std::string(""), sink), StageType::op_sink);
     }
 
     template<class InputType, class OutputType>
     LinearLinkInfo<InputType, OutputType> map(OutputType *(*map)(InputType *)) {
-        return add_stage(new MapAdapter<InputType, OutputType>(std::function<OutputType*(InputType*)>(map)),
-                StageType::op_sink);
+        return add_stage(new MapAdapter<InputType, OutputType>(std::function<OutputType *(InputType *)>(map)),
+                         StageType::op_map);
     };
 
     template<class DataType>
     LinearLinkInfo<DataType, DataType> filter(bool(*filter)(DataType *)) {
         return add_stage(new FilterAdapter<DataType>(std::function<bool(DataType *)>(filter)),
-                StageType::op_filter);
+                         StageType::op_filter);
     };
 
     template<class DataType>
     LinearLinkInfo<DataType, Batch<DataType>> batch(
             unsigned int batch_size, unsigned int timeout_ms) {
         return add_stage(new BatchAdapter<DataType>(batch_size, timeout_ms),
-                StageType::op_batch);
+                         StageType::op_batch);
     };
 
     template<class InputType, class OutputType>
     LinearLinkInfo<InputType, OutputType> explode(
             std::tuple<OutputType **, unsigned int>(*exploder)(InputType *)) {
         return add_stage(new ExplodeAdapter<InputType, OutputType>(exploder),
-                StageType::op_explode);
+                         StageType::op_explode);
     };
 
     LinearPipeline &add_conditional_stage(unsigned int (*cond_test)(LinearPipeline *));
@@ -640,11 +724,19 @@ LinearPipeline &LinearPipeline::add_conditional_stage(unsigned int (*cond_test)(
 
 template<class InputType, class OutputType>
 LinearLinkInfo<InputType, OutputType> LinearPipeline::add_stage(StageAdapter<InputType,
-                                                                OutputType> *stage_adapter,
+        OutputType> *stage_adapter,
                                                                 StageType type) {
     //std::cout << "Adding stage (adapter constructor) " << index << std::endl;
     auto index = stages++;
     auto adapter = std::shared_ptr<StageAdapter<InputType, OutputType>>(stage_adapter);
+
+    json stage = json::object({
+                                      {"index",       index},
+                                      {"input_type",  type_name<InputType>()},
+                                      {"output_type", type_name<OutputType>()}
+                              });
+    blueprint["pipeline"]["stages"].push_back(stage);
+    std::cout << stage.dump(4) << std::endl;
 
     if (type != StageType::op_source) {
         std::shared_ptr < BlockingConcurrentQueue < std::shared_ptr < InputType>>> input =
@@ -706,7 +798,7 @@ public:
         return lp.add_stage<LinkOutputType, NextType>(adapter);
     };
 
-    LinearLinkInfo<void , LinkOutputType> source(StageAdapter<void, LinkOutputType> *adapter) {
+    LinearLinkInfo<void, LinkOutputType> source(StageAdapter<void, LinkOutputType> *adapter) {
         return lp.source<void, LinkOutputType>(adapter);
     };
 
@@ -737,6 +829,207 @@ public:
         return lp.add_conditional_stage(cond_test);
     };
 };
+
+
+template<typename T, typename U>
+struct TestAdapter {
+};
+
+
+template<const char *name>
+struct name_to_type {
+};
+
+
+static constexpr char string_name[] = "string";
+template<>
+struct name_to_type<string_name> {
+    typedef std::string type;
+};
+
+static constexpr char json_name[] = "json";
+template<>
+struct name_to_type<json_name> {
+    typedef json type;
+};
+
+
+class PipelineStageConstructor {
+    static PipelineStageConstructor *factory;
+
+    PipelineStageConstructor() {}
+public:
+    std::map <std::string, std::string> supported_types_map;
+    std::map <std::string, std::string> map_to_function_links;
+
+    static PipelineStageConstructor *get() {
+        if (!factory) {
+            factory = new PipelineStageConstructor;
+        }
+        return PipelineStageConstructor::factory;
+    }
+
+    template<const char *T_name, const char *U_name>
+    decltype(auto) create_map_adapter() {
+        using input_type = typename name_to_type<T_name>::type;
+        using output_type = typename name_to_type<U_name>::type;
+
+        auto adapter = std::shared_ptr<StageAdapter<input_type, output_type>>(
+                new MapAdapter<input_type, output_type>());
+
+        return adapter;
+    }
+
+    template<typename T1, typename T2>
+    bool instantiate_adapters() {
+        create_map_adapter<T1, T2>();
+        create_map_adapter<T2, T2>();
+
+        return true;
+    }
+
+    // We can return dynamically constructed elements from here.
+    template<typename InputType>
+    void splice_output(std::string out_id, std::string op_name) {
+        if (type_name<std::string>() == out_id) {
+            auto adapter = std::shared_ptr<StageAdapter<InputType, std::string>>(
+                    new MapAdapter<InputType, std::string>());
+            std::cout << "Created a thing: " << type_name<decltype(adapter)>() << std::endl;
+        } else if (type_name<json>() == out_id) {
+            std::cout << "Out is a json object" << std::endl;
+            auto adapter = std::shared_ptr<StageAdapter<InputType, json>>(
+                    new MapAdapter<InputType, json>());
+            std::cout << "Created a thing: " << type_name<decltype(adapter)>() << std::endl;
+        } else {
+            std::stringstream sstream;
+            sstream << "Unsupported Output Type: " << supported_types_map[out_id] << std::endl;
+            throw (sstream.str());
+        }
+    }
+
+    void create(std::string type, std::string in, std::string out, std::string op_name) {
+        auto in_id = supported_types_map[in];
+        auto out_id = supported_types_map[out];
+
+        std::cout << "Creating: " << in_id << "*(*map)(" << out_id << "*)" << std::endl;
+
+        if (type_name<std::string>() == in_id) {
+            std::cout << "In is a string" << std::endl;
+            splice_output<std::string>(out_id, op_name);
+        } else if (type_name<json>() == in_id) {
+            std::cout << "In is a json object" << std::endl;
+            splice_output<json>(out_id, op_name);
+        } else {
+            std::stringstream sstream;
+            sstream << "Unsupported Input Type: " << supported_types_map[in] << std::endl;
+            throw (sstream.str());
+        }
+    }
+
+    /*
+    template<class Tin1, class Tin2>
+    std::function<StageAdapter<Tin1, Tin2> *(std::function<Tin2*(Tin1*)>)>
+    construct_map() {
+        auto func = [](std::function<Tin2*(Tin1*)> map) {
+            return new MapAdapter<Tin1, Tin2>(map);
+        };
+
+        return func;
+    };
+    */
+
+    template<class Tin1, class Tin2>
+    void do_init(std::string Id1, std::string Id2) {
+        supported_types_map[Id1] = type_name<Tin1>();
+        supported_types_map[Id2] = type_name<Tin2>();
+    };
+
+    // Want to take in a list of T Args, and instantiate constructors for all pairs of types
+    template<class Tin1, class Tin2>
+    void init_stage_constructors(std::string Id1, std::string Id2) {
+        do_init<Tin1, Tin2>(Id1, Id2);
+        do_init<Tin2, Tin1>(Id2, Id1);
+    };
+};
+
+PipelineStageConstructor *PipelineStageConstructor::factory = nullptr;
+
+template <class... Ts> struct Constructor {
+    template<const char *T_name, const char *U_name, typename... Args>
+    decltype(auto) get_map_adapter(Args&&... args) {
+        using input_type = typename name_to_type<T_name>::type;
+        using output_type = typename name_to_type<U_name>::type;
+
+        return create_map_adapter<input_type, output_type>(std::forward<Args>(args)...);
+    }
+};
+
+template <class T1, class T2, class...Ts>
+struct Constructor<T1, T2, Ts...> : Constructor<T1, Ts...>, Constructor<T2, Ts...> {
+    std::shared_ptr<StageAdapter<T1, T1>> create_map_adapter(T1*(*map)(T1*)) {
+        auto adapter = std::shared_ptr<StageAdapter<T1, T1>>(
+                new MapAdapter<T1, T1>());
+
+        return adapter;
+    };
+
+    std::shared_ptr<StageAdapter<T2, T2>> create_map_adapter(T2*(*map)(T2*)) {
+        auto adapter = std::shared_ptr<StageAdapter<T2, T2>>(
+                new MapAdapter<T2, T2>());
+
+        return adapter;
+    };
+
+    std::shared_ptr<StageAdapter<T1, T2>> create_map_adapter(T1*(*map)(T2*)) {
+        auto adapter = std::shared_ptr<StageAdapter<T1, T2>>(
+                new MapAdapter<T1, T2>());
+
+        return adapter;
+    };
+
+    std::shared_ptr<StageAdapter<T2, T1>> create_map_adapter(T2*(*map)(T1*)) {
+        auto adapter = std::shared_ptr<StageAdapter<T2, T1>>(
+                new MapAdapter<T2, T1>());
+
+        return adapter;
+    };
+};
+
+template <class... Ts> struct tuple {};
+
+template <class T, class... Ts>
+struct tuple<T, Ts...> : tuple<Ts...> {
+    tuple(T t, Ts... ts) : tuple<Ts...>(ts...), tail(t) {}
+
+    T tail;
+};
+
+template <size_t, class> struct elem_type_holder;
+
+template <class T, class... Ts>
+struct elem_type_holder<0, tuple<T, Ts...>> {
+typedef T type;
+};
+
+template <size_t k, class T, class... Ts>
+struct elem_type_holder<k, tuple<T, Ts...>> {
+typedef typename elem_type_holder<k - 1, tuple<Ts...>>::type type;
+};
+
+template <size_t k, class... Ts>
+typename std::enable_if<
+        k == 0, typename elem_type_holder<0, tuple<Ts...>>::type&>::type
+get(tuple<Ts...>& t) {
+    return t.tail;
+}
+
+template <size_t k, class T, class... Ts>
+typename std::enable_if<
+        k != 0, typename elem_type_holder<k, tuple<T, Ts...>>::type&>::type
+get(tuple<T, Ts...>& t) {
+    tuple<Ts...>& base = t;
+    return get<k - 1>(base);
+}
 
 unsigned int map_conditional_jump_to_start(LinearPipeline *lp) {
     if (lp->pipeline_running) {

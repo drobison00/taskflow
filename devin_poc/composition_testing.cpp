@@ -21,10 +21,6 @@
 using namespace std::chrono;
 using json = nlohmann::json;
 
-void test_func_1() {
-    std::cout << "test" << std::endl;
-}
-
 int main(int argc, char **argv) {
     unsigned int rate_per_sec = 1;
     if (argc > 1) {
@@ -37,10 +33,38 @@ int main(int argc, char **argv) {
     }
     int workers = 16;
 
-    tf::Executor executor(workers);
-    LinearPipeline lp(executor, true);
+    if (argc > 3) {
+    }
 
-    //lp.set_source<std::fstream, std::string>(std::string("devin_poc/without_data_len.json"), rate_per_sec)
+
+    PipelineStageConstructor *psc = PipelineStageConstructor::get();
+
+    psc->init_stage_constructors<std::string, json>(
+            std::string("string"), std::string("json"));
+
+    //auto success = psc->instantiate_adapters<string_name, json_name>();
+    //auto thing = psc->create_map_adapter<string_name, json_name>();
+    //std::cout << type_name< decltype(thing)>() << std::endl;
+
+    //auto thing =
+    //auto x = thing.create_map_adapter();
+    auto c = Constructor<std::string, json, Batch<json>, Batch<std::string>>();
+
+    //auto f = c.get_map_constructor<string_name, json_name>();
+    auto x = c.create_map_adapter(map_string_to_json);
+    auto y = c.create_map_adapter(map_random_trig_work<json>);
+    auto z = c.get_map_adapter<json_name, string_name>(map_string_to_json);
+
+    //std::cout << type_name<decltype(f)>() << std::endl;
+    std::cout << type_name<decltype(x)>() << std::endl;
+    std::cout << type_name<decltype(y)>() << std::endl;
+
+    return 0;
+    tf::Executor executor(workers);
+
+    // TODO: Apparently this can't be done inside a class
+    LinearPipeline lp(executor, psc, true);
+
     lp.source(new FileSourceAdapter(std::string("devin_poc/without_data_len.json"), rate_per_sec))
      .filter(filter_random_drop)                // Randomly drop 50% of packets
      .map(map_string_to_json)                   // Parse strings into JSON objects
@@ -52,7 +76,7 @@ int main(int argc, char **argv) {
      .map<json>(map_random_trig_work)           // Do intensive trig work and forward JSON packets
      .explode<json>(exploder_duplicate)         // Duplicated every JSON object 10x
      .batch(10, 10)                             // Batch 10 JSON objects at a time and forward
-     .sink(sink_discard)   // Sink all packets
+     .sink(sink_discard)                        // Sink all packets
      .add_conditional_stage(map_conditional_jump_to_start) // Taskflow loopback
      .visualize("main_graph.dot")
      .start(timeout);
