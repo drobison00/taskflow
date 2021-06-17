@@ -53,13 +53,12 @@ int main(int argc, char **argv) {
     //auto f = c.get_map_constructor<string_name, json_name>();
     auto x = c.create_map_adapter(map_string_to_json);
     auto y = c.create_map_adapter(map_random_trig_work<json>);
-    auto z = c.get_map_adapter<json_name, string_name>(map_string_to_json);
+    //auto z = c.get_map_adapter<json_name, string_name>(map_string_to_json);
 
     //std::cout << type_name<decltype(f)>() << std::endl;
     std::cout << type_name<decltype(x)>() << std::endl;
     std::cout << type_name<decltype(y)>() << std::endl;
 
-    return 0;
     tf::Executor executor(workers);
 
     // TODO: Apparently this can't be done inside a class
