@@ -17,6 +17,7 @@
 #include <string>
 
 #include <building_blocks.hpp>
+#include <lookup_tables.hpp>
 
 using namespace std::chrono;
 using json = nlohmann::json;
@@ -36,37 +37,17 @@ int main(int argc, char **argv) {
     if (argc > 3) {
     }
 
-
-    PipelineStageConstructor *psc = PipelineStageConstructor::get();
-
-    psc->init_stage_constructors<std::string, json>(
-            std::string("string"), std::string("json"));
-
-    //auto success = psc->instantiate_adapters<string_name, json_name>();
-    //auto thing = psc->create_map_adapter<string_name, json_name>();
-    //std::cout << type_name< decltype(thing)>() << std::endl;
-
-    //auto thing =
-    //auto x = thing.create_map_adapter();
-    auto c = Constructor<std::string, json, Batch<json>, Batch<std::string>>();
-
-    //auto f = c.get_map_constructor<string_name, json_name>();
-    auto x = c.create_map_adapter(map_string_to_json);
-    auto y = c.create_map_adapter(map_random_trig_work<json>);
-    //auto z = c.get_map_adapter<json_name, string_name>(map_string_to_json);
-
-    //std::cout << type_name<decltype(f)>() << std::endl;
-    std::cout << type_name<decltype(x)>() << std::endl;
-    std::cout << type_name<decltype(y)>() << std::endl;
-
     tf::Executor executor(workers);
 
+
     // TODO: Apparently this can't be done inside a class
-    LinearPipeline lp(executor, psc, true);
+    LinearPipeline lp(executor, true);
+
+    //lp.add_stage_by_name("map", "map_string_to_json");  // Parse strings into JSON objects
+    //lp.add_stage_by_name("filter", "filter_random_drop");  // Parse strings into JSON objects
 
     lp.source(new FileSourceAdapter(std::string("devin_poc/without_data_len.json"), rate_per_sec))
-     .filter(filter_random_drop)                // Randomly drop 50% of packets
-     .map(map_string_to_json)                   // Parse strings into JSON objects
+     .map(map_string_to_json)
      .explode<json>(exploder_duplicate)         // Duplicated every JSON object 10x
      .map(map_random_work_on_json_object)       // Perform various operations on each JSON object
      .map<json>(map_random_trig_work)           // Do intensive trig work and forward JSON packets

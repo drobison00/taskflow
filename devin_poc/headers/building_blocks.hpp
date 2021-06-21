@@ -30,22 +30,9 @@ name = __FUNCSIG__;
   prefix = "auto __cdecl type_name<";
   suffix = ">(void) noexcept";
 #endif
-name.
-remove_prefix(prefix
-.
-
-size()
-
-);
-name.
-remove_suffix(suffix
-.
-
-size()
-
-);
-return
-name;
+name.remove_prefix(prefix.size());
+name.remove_suffix(suffix.size());
+return name;
 };
 
 
@@ -163,9 +150,6 @@ void FileSourceAdapter::init() {
 };
 
 void FileSourceAdapter::pump() {
-    //std::string data;
-    //std::getline(source, data);
-
     this->output_buffer = std::shared_ptr<std::string>(new std::string(data_debug));
     while (this->running == 1 && not(this->output->try_enqueue_bulk(&this->output_buffer, 1))) {
         std::this_thread::sleep_for(std::chrono::nanoseconds(100));
@@ -360,6 +344,12 @@ json *map_string_to_json(std::string *s) {
     return new json(json::parse(*s));
 }
 
+
+template<class In, class Out>
+Out* map_passthrough(In *o) {
+    return new Out(*o);
+}
+
 json *map_random_work_on_json_object(json *_j) {
     json *__j = new json(*_j);
     json j = *__j;
@@ -390,9 +380,9 @@ json *map_random_work_on_json_object(json *_j) {
 
 // Function examples
 
-template<typename DataType>
-bool filter_random_drop(DataType *d) {
-    return (std::rand() % 2 == 0);
+template<typename InputType>
+bool filter_random_drop(InputType *d) {
+    return std::rand() % 2 == 0;
 };
 
 template<typename DataType>
@@ -411,8 +401,7 @@ DataType *map_random_trig_work(DataType *d) {
     return new DataType(*d);
 }
 
-template<>
-json *map_random_trig_work(json *d) {
+json *map_random_trig_work_json(json *d) {
     double MYPI = 3.14159265;
     int how_many = std::rand() % 100000;
     double random_angle_rads = MYPI * ((double) std::rand() / (double) RAND_MAX);
@@ -472,7 +461,6 @@ struct TaskStats {
     std::chrono::time_point <std::chrono::steady_clock> last_visited;
 };
 
-
 class LinearPipeline {
 public:
     enum StageType {
@@ -491,33 +479,32 @@ public:
                                 }
             }
     };
+
+
     std::atomic<unsigned int> pipeline_running = 0;
     std::vector <std::shared_ptr<void>> edges;
     std::vector <std::unique_ptr<TaskStats>> task_stats;
     std::map<unsigned int, tf::Task> id_to_task_map;
     std::vector <tf::Task> task_chain;
 
-    PipelineStageConstructor *psc;
     tf::Task init, start_task, end;
     tf::Taskflow pipeline;
     tf::Executor &service_executor;
 
     ~LinearPipeline() {};
 
-    LinearPipeline(tf::Executor &executor, PipelineStageConstructor *psc) :
-            psc{psc}, service_executor{executor} {
+    LinearPipeline(tf::Executor &executor) :
+            service_executor{executor} {
 
         init = pipeline.emplace([]() {
-            //std::cout << "Initializing Pipeline" << std::endl;
         });
 
         end = pipeline.emplace([]() {
-            //std::cout << std::endl << std::flush << "\nTerminating Pipeline" << std::endl;
         });
     }
 
-    LinearPipeline(tf::Executor &executor, PipelineStageConstructor *psc, bool print_stats) :
-            psc{psc}, service_executor{executor}, print_stats{print_stats} {
+    LinearPipeline(tf::Executor &executor, bool print_stats) :
+            service_executor{executor}, print_stats{print_stats} {
 
         init = pipeline.emplace([this]() {
             //std::cout << "Initializing Pipeline" << std::endl;
@@ -613,13 +600,43 @@ public:
         return *this;
     }
 
-    LinearPipeline &add_stage_by_name(std::string adapter_type,
-                                      std::string input_type,
-                                      std::string output_type) {
+    template<template<typename, typename> class AdapterType, class InputType, class OutputType>
+    decltype(auto) create_adapter(OutputType*(*func)(InputType*)) {
+        return std::shared_ptr<MapAdapter<InputType, OutputType>>(
+                (new AdapterType<InputType, OutputType>(func)));
+    }
 
+    LinearPipeline &add_stage_by_name(std::string adapter_type, std::string op_name) {
+        if (adapter_type == "source"){
+
+        } else if (adapter_type == "filter") {
+          /*  auto adapter = create_adapter<FilterAdapter>([](json *d) -> bool* {
+                return new bool(true);
+            });
+            std::cout << "Created Adapter: " << type_name<decltype(adapter)>() << std::endl;
+            */
+        } else if (adapter_type == "map") {
+            auto adapter = create_adapter<MapAdapter>(map_string_to_json);
+            std::cout << "Created Adapter: " << type_name<decltype(adapter)>() << std::endl;
+        } else if (adapter_type == "explode") {
+
+        } else if (adapter_type == "batch") {
+
+        } else if (adapter_type == "sink") {
+
+        } else {
+            std::string err("Unknown adapter type: ");
+            err += adapter_type;
+
+            throw (err);
+        }
 
         return *this;
     }
+
+    template<class InputType, class OutputType>
+    LinearLinkInfo<InputType, OutputType> add_stage(
+            std::shared_ptr<StageAdapter<InputType, OutputType>> adapter, StageType type);
 
     template<class InputType, class OutputType>
     LinearLinkInfo<InputType, OutputType> add_stage(StageAdapter<InputType, OutputType> *adapter, StageType type);
@@ -723,12 +740,10 @@ LinearPipeline &LinearPipeline::add_conditional_stage(unsigned int (*cond_test)(
 }
 
 template<class InputType, class OutputType>
-LinearLinkInfo<InputType, OutputType> LinearPipeline::add_stage(StageAdapter<InputType,
-        OutputType> *stage_adapter,
-                                                                StageType type) {
-    //std::cout << "Adding stage (adapter constructor) " << index << std::endl;
+LinearLinkInfo<InputType, OutputType> LinearPipeline::add_stage(
+        std::shared_ptr<StageAdapter<InputType, OutputType>> adapter, StageType type) {
     auto index = stages++;
-    auto adapter = std::shared_ptr<StageAdapter<InputType, OutputType>>(stage_adapter);
+
 
     json stage = json::object({
                                       {"index",       index},
@@ -784,6 +799,14 @@ LinearLinkInfo<InputType, OutputType> LinearPipeline::add_stage(StageAdapter<Inp
     return LinearLinkInfo<InputType, OutputType>(*this);
 }
 
+template<class InputType, class OutputType>
+LinearLinkInfo<InputType, OutputType> LinearPipeline::add_stage(StageAdapter<InputType,
+        OutputType> *stage_adapter,
+                                                                StageType type) {
+    auto adapter = std::shared_ptr<StageAdapter<InputType, OutputType>>(stage_adapter);
+    return add_stage(adapter, type);
+}
+
 template<class SourceLinkInput, class LinkOutputType>
 class LinearLinkInfo {
 public:
@@ -796,6 +819,11 @@ public:
     template<class NextType>
     LinearLinkInfo<LinkOutputType, NextType> add_stage(StageAdapter<LinkOutputType, NextType> *adapter) {
         return lp.add_stage<LinkOutputType, NextType>(adapter);
+    };
+
+
+    LinearLinkInfo<LinkOutputType, LinkOutputType> add_stage_by_name(std::string adapter_type, std::string op_name) {
+        return lp.add_stage_by_name(adapter_type, op_name);
     };
 
     LinearLinkInfo<void, LinkOutputType> source(StageAdapter<void, LinkOutputType> *adapter) {
@@ -827,173 +855,6 @@ public:
 
     LinearPipeline &add_conditional_stage(unsigned int (*cond_test)(LinearPipeline *)) {
         return lp.add_conditional_stage(cond_test);
-    };
-};
-
-
-template<typename T, typename U>
-struct TestAdapter {
-};
-
-
-template<const char *name>
-struct name_to_type {
-};
-
-
-static constexpr char string_name[] = "string";
-template<>
-struct name_to_type<string_name> {
-    typedef std::string type;
-};
-
-static constexpr char json_name[] = "json";
-template<>
-struct name_to_type<json_name> {
-    typedef json type;
-};
-
-
-class PipelineStageConstructor {
-    static PipelineStageConstructor *factory;
-
-    PipelineStageConstructor() {}
-public:
-    std::map <std::string, std::string> supported_types_map;
-    std::map <std::string, std::string> map_to_function_links;
-
-    static PipelineStageConstructor *get() {
-        if (!factory) {
-            factory = new PipelineStageConstructor;
-        }
-        return PipelineStageConstructor::factory;
-    }
-
-    template<const char *T_name, const char *U_name>
-    decltype(auto) create_map_adapter() {
-        using input_type = typename name_to_type<T_name>::type;
-        using output_type = typename name_to_type<U_name>::type;
-
-        auto adapter = std::shared_ptr<StageAdapter<input_type, output_type>>(
-                new MapAdapter<input_type, output_type>());
-
-        return adapter;
-    }
-
-    template<typename T1, typename T2>
-    bool instantiate_adapters() {
-        create_map_adapter<T1, T2>();
-        create_map_adapter<T2, T2>();
-
-        return true;
-    }
-
-    // We can return dynamically constructed elements from here.
-    template<typename InputType>
-    void splice_output(std::string out_id, std::string op_name) {
-        if (type_name<std::string>() == out_id) {
-            auto adapter = std::shared_ptr<StageAdapter<InputType, std::string>>(
-                    new MapAdapter<InputType, std::string>());
-            std::cout << "Created a thing: " << type_name<decltype(adapter)>() << std::endl;
-        } else if (type_name<json>() == out_id) {
-            std::cout << "Out is a json object" << std::endl;
-            auto adapter = std::shared_ptr<StageAdapter<InputType, json>>(
-                    new MapAdapter<InputType, json>());
-            std::cout << "Created a thing: " << type_name<decltype(adapter)>() << std::endl;
-        } else {
-            std::stringstream sstream;
-            sstream << "Unsupported Output Type: " << supported_types_map[out_id] << std::endl;
-            throw (sstream.str());
-        }
-    }
-
-    void create(std::string type, std::string in, std::string out, std::string op_name) {
-        auto in_id = supported_types_map[in];
-        auto out_id = supported_types_map[out];
-
-        std::cout << "Creating: " << in_id << "*(*map)(" << out_id << "*)" << std::endl;
-
-        if (type_name<std::string>() == in_id) {
-            std::cout << "In is a string" << std::endl;
-            splice_output<std::string>(out_id, op_name);
-        } else if (type_name<json>() == in_id) {
-            std::cout << "In is a json object" << std::endl;
-            splice_output<json>(out_id, op_name);
-        } else {
-            std::stringstream sstream;
-            sstream << "Unsupported Input Type: " << supported_types_map[in] << std::endl;
-            throw (sstream.str());
-        }
-    }
-
-    /*
-    template<class Tin1, class Tin2>
-    std::function<StageAdapter<Tin1, Tin2> *(std::function<Tin2*(Tin1*)>)>
-    construct_map() {
-        auto func = [](std::function<Tin2*(Tin1*)> map) {
-            return new MapAdapter<Tin1, Tin2>(map);
-        };
-
-        return func;
-    };
-    */
-
-    template<class Tin1, class Tin2>
-    void do_init(std::string Id1, std::string Id2) {
-        supported_types_map[Id1] = type_name<Tin1>();
-        supported_types_map[Id2] = type_name<Tin2>();
-    };
-
-    // Want to take in a list of T Args, and instantiate constructors for all pairs of types
-    template<class Tin1, class Tin2>
-    void init_stage_constructors(std::string Id1, std::string Id2) {
-        do_init<Tin1, Tin2>(Id1, Id2);
-        do_init<Tin2, Tin1>(Id2, Id1);
-    };
-};
-
-PipelineStageConstructor *PipelineStageConstructor::factory = nullptr;
-
-template <class... Ts> struct Constructor {
-    /*
-    template<const char *T_name, const char *U_name, typename... Args>
-    decltype(auto) get_map_adapter(Args&&... args) {
-        using input_type = typename name_to_type<T_name>::type;
-        using output_type = typename name_to_type<U_name>::type;
-
-        return create_map_adapter<input_type, output_type>(std::forward<Args>(args)...);
-    }
-     */
-};
-
-template <class T1, class T2, class...Ts>
-struct Constructor<T1, T2, Ts...> : Constructor<T1, Ts...>, Constructor<T2, Ts...> {
-    std::shared_ptr<StageAdapter<T1, T1>> create_map_adapter(T1*(*map)(T1*)) {
-        auto adapter = std::shared_ptr<StageAdapter<T1, T1>>(
-                new MapAdapter<T1, T1>());
-
-        return adapter;
-    };
-
-    std::shared_ptr<StageAdapter<T2, T2>> create_map_adapter(T2*(*map)(T2*)) {
-        auto adapter = std::shared_ptr<StageAdapter<T2, T2>>(
-                new MapAdapter<T2, T2>());
-
-        return adapter;
-    };
-
-    std::shared_ptr<StageAdapter<T1, T2>> create_map_adapter(T1*(*map)(T2*)) {
-        auto adapter = std::shared_ptr<StageAdapter<T1, T2>>(
-                new MapAdapter<T1, T2>());
-
-        return adapter;
-    };
-
-    std::shared_ptr<StageAdapter<T2, T1>> create_map_adapter(T2*(*map)(T1*)) {
-        auto adapter = std::shared_ptr<StageAdapter<T2, T1>>(
-                new MapAdapter<T2, T1>());
-
-        return adapter;
     };
 };
 
