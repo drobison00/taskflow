@@ -361,14 +361,6 @@ LinearPipeline& LinearPipeline::add_stage(StageAdapter<InputType, OutputType>* a
     return *this;
 }
 
-/*template<class InputType, class OutputType>
-LinearPipeline& LinearPipeline::add_stage(StageAdapter<InputType,
-        OutputType> *stage_adapter, StageType type) {
-    auto adapter = std::shared_ptr<StageAdapter<InputType, OutputType>>(stage_adapter);
-    return add_stage(adapter, type);
-}*/
-
-
 unsigned int map_conditional_jump_to_start(LinearPipeline *lp) {
     if (lp->pipeline_running) {
         return 0;
