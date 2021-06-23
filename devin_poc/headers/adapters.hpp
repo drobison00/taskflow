@@ -7,6 +7,8 @@
 #include <nlohmann/json.hpp>
 #include <taskflow/taskflow.hpp>
 
+#include <boost/fiber/all.hpp>
+
 #ifndef TASKFLOW_ADAPTERS_HPP
 #define TASKFLOW_ADAPTERS_HPP
 
@@ -63,7 +65,7 @@ public:
 
     void init() override { return; }
 
-    void pump() override { return; };
+    void pump() override { return; }
 
     unsigned int queue_size() override {
         return input->size_approx();
@@ -76,39 +78,35 @@ public:
 
 class FileSourceAdapter : public StageAdapter<void, std::string> {
 public:
-    unsigned int max_read_rate;
     std::string connection_string;
     std::string data_debug; // TODO: only for testing
     std::fstream input_file_stream;
 
-    FileSourceAdapter(std::string connection_string, unsigned int max_read_rate) :
-            connection_string{connection_string}, max_read_rate{max_read_rate},
-            StageAdapter<void, std::string>() {};
+    FileSourceAdapter() : StageAdapter<void, std::string>() {};
+    FileSourceAdapter(std::string connection_string) :
+            connection_string{connection_string}, StageAdapter<void, std::string>() {};
 
-    void init() override;
+    void init() override {
+        input_file_stream = std::fstream();
+        input_file_stream.open(connection_string);
 
-    void pump() override;
+        //TODO: For debugging
+        std::getline(input_file_stream, data_debug);
+    };
+
+    void pump() override {
+        this->output_buffer = std::shared_ptr<std::string>(new std::string(data_debug));
+
+        while (this->running == 1 && not(this->output->try_enqueue_bulk(&this->output_buffer, 1))) {
+            boost::this_fiber::yield();
+        }
+
+        this->processed += 1;
+    };
 
     unsigned int queue_size() override {
         return this->output->size_approx();
     };
-};
-
-void FileSourceAdapter::init() {
-    input_file_stream = std::fstream();
-    input_file_stream.open(connection_string);
-
-    //TODO: For debugging
-    std::getline(input_file_stream, data_debug);
-};
-
-void FileSourceAdapter::pump() {
-    this->output_buffer = std::shared_ptr<std::string>(new std::string(data_debug));
-    while (this->running == 1 && not(this->output->try_enqueue_bulk(&this->output_buffer, 1))) {
-        std::this_thread::sleep_for(std::chrono::nanoseconds(100));
-    }
-
-    this->processed += 1;
 };
 
 template<class InputType>
@@ -175,7 +173,8 @@ void MapAdapter<InputType, OutputType>::pump() {
         this->output_buffer = std::shared_ptr<OutputType>(map(this->input_buffer.get()));
         while (this->running == 1 &&
                not(this->output->try_enqueue_bulk(&this->output_buffer, this->output_buffer_size))) {
-            std::this_thread::sleep_for(std::chrono::nanoseconds(100));
+            boost::this_fiber::yield();
+            //std::this_thread::sleep_for(std::chrono::nanoseconds(100));
         };
 
         this->processed += 1;
@@ -207,7 +206,8 @@ void FilterAdapter<DataType>::pump() {
         if (this->filter(this->input_buffer.get())) {
             while (this->running == 1 &&
                    not(this->output->try_enqueue_bulk(&this->input_buffer, this->output_buffer_size))) {
-                std::this_thread::sleep_for(std::chrono::nanoseconds(100));
+                boost::this_fiber::yield();
+                //std::this_thread::sleep_for(std::chrono::nanoseconds(100));
             };
             this->processed += 1;
         }
@@ -251,7 +251,8 @@ void ExplodeAdapter<InputType, OutputType>::pump() {
         delete out;
 
         while (this->running == 1 && not(this->output->try_enqueue_bulk(&buffer_out[0], buffer_sz))) {
-            std::this_thread::sleep_for(std::chrono::nanoseconds(100));
+            boost::this_fiber::yield();
+            //std::this_thread::sleep_for(std::chrono::nanoseconds(100));
         }
 
         this->processed += 1;
@@ -285,7 +286,8 @@ void BatchAdapter<DataType>::pump() {
         }
 
         while (this->running == 1 && not(this->output->try_enqueue_bulk(&batch_object, 1))) {
-            std::this_thread::sleep_for(std::chrono::nanoseconds(100));
+            boost::this_fiber::yield();
+            //std::this_thread::sleep_for(std::chrono::nanoseconds(100));
         }
 
         this->processed += this->read_count;

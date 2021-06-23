@@ -12,7 +12,6 @@ json *map_string_to_json(std::string *s) {
     return new json(json::parse(*s));
 }
 
-
 template<class In, class Out>
 Out* map_passthrough(In *o) {
     return new Out(*o);

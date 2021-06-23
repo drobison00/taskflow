@@ -8,6 +8,8 @@
 #include <nlohmann/json.hpp>
 #include <taskflow/taskflow.hpp>
 
+#include <boost/fiber/all.hpp>
+
 #ifndef TASKFLOW_BUILDING_BLOCKS_HPP
 #define TASKFLOW_BUILDING_BLOCKS_HPP
 using namespace moodycamel;
@@ -163,6 +165,7 @@ public:
 
     LinearPipeline &start(unsigned int runtime = 0) {
         pipeline_running = 1;
+        boost::fibers::use_scheduling_algorithm< boost::fibers::algo::shared_work >();
 
         if (runtime > 0) {
             service_executor.silent_async([this, runtime]() {
@@ -191,40 +194,6 @@ public:
         return *this;
     }
 
-    template<template<typename, typename> class AdapterType, class InputType, class OutputType>
-    decltype(auto) create_adapter(OutputType*(*func)(InputType*)) {
-        return std::shared_ptr<MapAdapter<InputType, OutputType>>(
-                (new AdapterType<InputType, OutputType>(func)));
-    }
-
-    LinearPipeline &add_stage_by_name(std::string adapter_type, std::string op_name) {
-        if (adapter_type == "source"){
-
-        } else if (adapter_type == "filter") {
-          /*  auto adapter = create_adapter<FilterAdapter>([](json *d) -> bool* {
-                return new bool(true);
-            });
-            std::cout << "Created Adapter: " << type_name<decltype(adapter)>() << std::endl;
-            */
-        } else if (adapter_type == "map") {
-            auto adapter = create_adapter<MapAdapter>(map_string_to_json);
-            std::cout << "Created Adapter: " << type_name<decltype(adapter)>() << std::endl;
-        } else if (adapter_type == "explode") {
-
-        } else if (adapter_type == "batch") {
-
-        } else if (adapter_type == "sink") {
-
-        } else {
-            std::string err("Unknown adapter type: ");
-            err += adapter_type;
-
-            throw (err);
-        }
-
-        return *this;
-    }
-
     template<class InputType, class OutputType>
     LinearPipeline &add_stage(
             std::shared_ptr<StageAdapter<InputType, OutputType>> adapter, StageType type);
@@ -235,6 +204,15 @@ public:
     template<class OutputType>
     LinearPipeline &source(StageAdapter<void, OutputType> *adapter) {
         return add_stage(adapter, StageType::op_source);
+    }
+
+    LinearPipeline &source(std::string&& source_type, std::string&& connection_type) {
+        if (source_type == "file") {
+            auto adapter = new FileSourceAdapter(connection_type);
+            return add_stage(adapter, StageType::op_source);
+        } else {
+            throw ("Unsupported source type.");
+        }
     }
 
     template<class InputType>
@@ -314,7 +292,6 @@ LinearPipeline &LinearPipeline::add_conditional_stage(unsigned int (*cond_test)(
     auto index = stages++;
     task_stats.push_back(std::unique_ptr<TaskStats>(new TaskStats()));
     task_stats[index]->stage_type = StageType::op_conditional;
-    //std::cout << "Adding conditional at " << index << std::endl;
 
     tf::Task conditional = pipeline.emplace([this, cond_test]() {
         return cond_test(this);
@@ -359,12 +336,13 @@ LinearPipeline& LinearPipeline::add_stage(StageAdapter<InputType, OutputType>* a
         if (adapter->running.compare_exchange_strong(a, b)) {
             adapter->init();
 
-            service_executor.silent_async([&]() {
+            std::thread([this, index, &adapter]() {
+                boost::fibers::use_scheduling_algorithm< boost::fibers::algo::shared_work >();
                 while (this->pipeline_running == 1) {
                     adapter->pump();
                 }
                 adapter->running = 0;
-            });
+            }).detach();
         }
 
         update_task_stats(index, adapter->processed, adapter->queue_size());

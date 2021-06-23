@@ -31,19 +31,15 @@ int main(int argc, char **argv) {
     if (argc > 2) {
         timeout = std::stoi(argv[2]);
     }
-    int workers = 16;
+    int workers = 4;
 
     if (argc > 3) {
     }
 
     tf::Executor executor(workers);
-
-
-    // TODO: Apparently this can't be done inside a class
     LinearPipeline lp(executor, true);
 
-
-    lp.source(new FileSourceAdapter(std::string("devin_poc/without_data_len.json"), rate_per_sec))
+    lp.source(std::string("file"), std::string("devin_poc/without_data_len.json"))
      .map(map_string_to_json)
      .map(map_random_work_on_json_object)                   // Perform various operations on each JSON object
      .map(map_random_trig_work_json)                        // Do intensive trig work and forward JSON packets
