@@ -77,25 +77,7 @@ namespace taskflow_pipeline {
     };
     */
 
-    // Take a single element vector containing a string, and parse to a json object
-    DataVariant map_parse_to_json(std::vector <DataVariant> v) {
-        std::shared_ptr<std::string> s = boost::get<std::shared_ptr<std::string>>(v[0]);
-        //std::cout << "Parsing: " << *s << std::endl;
-        return std::shared_ptr<json>(new json(json::parse(*s)));
-    }
 
-    DataVariant map_merge_json(std::vector<DataVariant> v) {
-        std::shared_ptr<json> j = boost::get<std::shared_ptr<json>>(v[0]);
-        json *merged = new json(*j);
-        for (auto it=v.begin() + 1; it != v.end(); it++) {
-            std::shared_ptr<json> j = boost::get<std::shared_ptr<json>>(*it);
-            merged->merge_patch(*j);
-        }
-
-        return std::shared_ptr<json>(merged);
-    }
-
-    void sink_passthrough(std::vector <DataVariant> v) {}
 
     class StageAdapterBaseExt {
     public:
