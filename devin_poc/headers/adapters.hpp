@@ -86,10 +86,11 @@ MapItem<KeyT, ValueT> make_kv_pair(KeyT&& k, ValueT&& v) {
 struct sentinel {};
 
 typedef boost::variant<
-std::shared_ptr<std::string>,
-std::shared_ptr<json>,
-std::shared_ptr<int>,
-std::shared_ptr<double>
+    std::shared_ptr<std::string>,
+    std::shared_ptr<json>,
+    std::shared_ptr<int>,
+    std::shared_ptr<double>,
+    std::shared_ptr<sentinel>
 > EdgeData;
 
 typedef boost::variant<
@@ -118,30 +119,26 @@ void QDispatchVisitor::operator()(sentinel &queue) const {
     std::cout << "Visitor found a sentinel! This is unexpected" << std::endl;
 }
 
-
 class StageAdapterExt : public StageAdapterBase {
 public:
     std::string output_type;
-    std::shared_ptr<Edge> output_buffer;
-    std::vector<std::shared_ptr<Edge>> inputs;
-    std::vector<std::shared_ptr<Edge>> subscribers;
+    std::vector<std::shared_ptr<BlockingConcurrentQueue<EdgeData>>> inputs;
+    std::vector<std::shared_ptr<BlockingConcurrentQueue<EdgeData>>> subscribers;
+
     std::atomic<unsigned int> running;
     std::atomic<unsigned int> initialized;
 
     EdgeData data_buffer;
-    QDispatchVisitor dispatch_visitor;
 
     unsigned int processed = 0;
     unsigned int input_buffer_size = 1;
     unsigned int output_buffer_size = 1;
     unsigned int max_queue_size = 6 * (2 << 15);
+    unsigned int read_count = 0;
 
     ~StageAdapterExt() = default;
 
-    StageAdapterExt(Edge *buffer) : running{0}, initialized{0}, inputs(), subscribers(),
-                                    dispatch_visitor(data_buffer) {
-        output_buffer = std::shared_ptr<Edge>(buffer);
-    };
+    StageAdapterExt() : running{0}, initialized{0}, inputs(), subscribers() {};
 
     void init() override {};
 
@@ -156,7 +153,7 @@ public:
     std::string data_debug; // TODO: only for testing
     std::fstream input_file_stream;
 
-    FileSourceAdapterExt(Edge *edge) : StageAdapterExt(edge) {};
+    FileSourceAdapterExt() : StageAdapterExt() {};
 
     void init() override final {
         input_file_stream = std::fstream();
@@ -167,21 +164,71 @@ public:
     };
 
     void pump() override final {
-        data_buffer = std::shared_ptr<std::string>(new std::string(data_debug));
+        data_buffer = EdgeData(std::shared_ptr<std::string> (new std::string(data_debug)));
+        //this->read_count = this->input->wait_dequeue_bulk_timed(&data_buffer,
+        //                                                        1, std::chrono::milliseconds(10));
         for (auto sub = this->subscribers.begin(); sub != this->subscribers.end(); sub++) {
-            //std::cout << type_name2<decltype(*((*sub).get()))>() << std::endl;
-
-            boost::apply_visitor(dispatch_visitor, *(*sub).get());
-            std::this_thread::sleep_for(std::chrono::seconds(5));
+            //std::cout << type_name2<decltype((*sub).get())>() << std::endl;
+            //std::cout << type_name2<decltype(data_buffer)>() << std::endl;
+            //boost::apply_visitor(dispatch_visitor, *(*sub).get());
+            while (this->running and not (*sub)->try_enqueue_bulk(&data_buffer, this->input_buffer_size) ) {
+                boost::this_fiber::yield();
+            };
         }
+        std::this_thread::sleep_for(std::chrono::seconds(5));
 
         this->processed += 1;
     };
 
     unsigned int queue_size() override final {
-        return 0;
         //return this->output_buffer->size_approx();
+        return 0;
     };
+};
+
+class MapAdapterExt : public StageAdapterExt {
+public:
+    MapAdapterExt() : StageAdapterExt() {};
+
+    std::vector<EdgeData> input_buffers;
+
+    void pump() override {
+        // TODO
+        std::vector<EdgeData> buffers;
+        for (auto in = this->inputs.begin(); in != this->inputs.end(); in++) {
+            this->read_count = 0;
+            EdgeData buffer;
+            while (this->running == 1) {
+                this->read_count = (*in)->wait_dequeue_bulk_timed(&buffer, this->input_buffer_size,
+                                                                        std::chrono::milliseconds(10));
+                if (this->read_count > 0) {
+                    break;
+                }
+
+                boost::this_fiber::yield();
+            };
+
+            buffers.push_back(buffer);
+        }
+
+        std::cout << "Got an input pack" << std::endl;
+
+        // Call function that takes vector input
+        /*
+        this->read_count = this->input->wait_dequeue_bulk_timed(&buffer,
+                                                                this->input_buffer_size, std::chrono::milliseconds(10));
+        if (this->read_count > 0) {
+            this->output_buffer = std::shared_ptr<OutputType>(map(this->input_buffer.get()));
+            while (this->running == 1 &&
+                   not(this->output->try_enqueue_bulk(&this->output_buffer, this->output_buffer_size))) {
+                boost::this_fiber::yield();
+                //std::this_thread::sleep_for(std::chrono::nanoseconds(100));
+            };
+
+            this->processed += 1;
+        }
+        */
+    }
 };
 
 

@@ -111,38 +111,6 @@ public:
         return *this;
     };
 
-    template<typename DataType>
-    Edge *_create_edge() {
-        auto edge = new Edge();
-        *edge = new BlockingConcurrentQueue < std::shared_ptr < DataType >> ();
-
-        return edge;
-    }
-
-    Edge *_create_sentinel_edge() {
-        auto edge = new Edge();
-        *edge = sentinel();
-
-        return edge;
-    }
-
-    Edge *create_edge(std::string variant_id) {
-        if (variant_id == "string") {
-            return _create_edge<std::string>();
-        } else if (variant_id == "json") {
-            return _create_edge<json>();
-        } else if (variant_id == "none") {
-            return _create_sentinel_edge();
-        } else {
-            throw ("Unknown edge variant type");
-        }
-    }
-
-    template<typename AdapterType>
-    decltype(auto) create_adapter(Edge *edge) {
-        return std::shared_ptr<StageAdapterExt>(new AdapterType(edge));
-    }
-
     template<typename FType>
     Pipeline &add_node(std::string &&adapter_type, std::string &&task_name, std::string &&output_type,
                        std::vector <std::string> &&inputs,
@@ -162,13 +130,13 @@ Pipeline &Pipeline::add_node(std::string &&adapter_type,
         throw (sstream.str());
     }
 
-    Edge *output_buffer = create_edge(output_type);
-
     std::shared_ptr<StageAdapterExt> adapter;
     if (adapter_type == "file") {
-        adapter = create_adapter<FileSourceAdapterExt>(output_buffer);
+        adapter = std::shared_ptr<StageAdapterExt>(new FileSourceAdapterExt());
+    } else if (adapter_type == "map") {
+        adapter = std::shared_ptr<StageAdapterExt>(new MapAdapterExt());
     } else {
-        adapter = std::shared_ptr<StageAdapterExt>(new StageAdapterExt(output_buffer));
+        adapter = std::shared_ptr<StageAdapterExt>(new StageAdapterExt());
     }
 
     adapter->output_type = output_type;
@@ -185,7 +153,8 @@ Pipeline &Pipeline::add_node(std::string &&adapter_type,
                     throw ("Cycles are not currently supported");
                 }
 
-                auto edge = std::shared_ptr<Edge>(this->create_edge(parent->second->output_type));
+                auto edge = std::shared_ptr<BlockingConcurrentQueue<EdgeData>>(
+                        new BlockingConcurrentQueue<EdgeData>());
                 //std::cout << "-------" << std::endl;
                 //std::cout << type_name< decltype(edge)>() << std::endl;
                 //std::cout << "-------" << std::endl;
