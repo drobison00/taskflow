@@ -2,6 +2,7 @@
 // Created by drobison on 6/22/21.
 //
 #include <batch.hpp>
+#include <common.hpp>
 #include <blockingconcurrentqueue.h>
 
 #include <nlohmann/json.hpp>
@@ -12,29 +13,6 @@
 
 #ifndef TASKFLOW_ADAPTERS_HPP
 #define TASKFLOW_ADAPTERS_HPP
-
-template<typename T>
-constexpr auto type_name2() noexcept {
-std::string_view name = "Error: unsupported compiler", prefix, suffix;
-#ifdef __clang__
-name = __PRETTY_FUNCTION__;
-              prefix = "auto type_name() [T = ";
-              suffix = "]";
-#elif defined(__GNUC__)
-name = __PRETTY_FUNCTION__;
-              prefix = "constexpr auto type_name() [with T = ";
-              suffix = "]";
-#elif defined(_MSC_VER)
-name = __FUNCSIG__;
-              prefix = "auto __cdecl type_name<";
-              suffix = ">(void) noexcept";
-#endif
-name.remove_prefix(prefix.size());
-name.remove_suffix(suffix.size());
-
-return name;
-}
-
 
 using namespace moodycamel;
 using namespace nlohmann;
@@ -49,188 +27,6 @@ public:
 
     virtual unsigned int queue_size() = 0;
 };
-
-// Class: MapItem
-template <typename KeyT, typename ValueT>
-class MapItem {
-
-public:
-    using KeyType = std::conditional_t <std::is_lvalue_reference_v<KeyT>, KeyT, std::decay_t<KeyT>>;
-    using ValueType = std::conditional_t <std::is_lvalue_reference_v<ValueT>, ValueT, std::decay_t<ValueT>>;
-
-    MapItem(KeyT&& k, ValueT&& v) : _key(std::forward<KeyT>(k)), _value(std::forward<ValueT>(v)) {}
-    MapItem& operator = (const MapItem&) = delete;
-
-    inline const KeyT& key() const { return _key; }
-    inline const ValueT& value() const { return _value; }
-
-    template <typename ArchiverT>
-    auto save(ArchiverT & ar) const { return ar(_key, _value); }
-
-    template <typename ArchiverT>
-    auto load(ArchiverT & ar) { return ar(_key, _value); }
-
-private:
-
-    KeyType _key;
-    ValueType _value;
-};
-
-// Function: make_kv_pair
-template <typename KeyT, typename ValueT>
-MapItem<KeyT, ValueT> make_kv_pair(KeyT&& k, ValueT&& v) {
-    return { std::forward<KeyT>(k), std::forward<ValueT>(v) };
-}
-
-
-struct sentinel {};
-
-typedef boost::variant<
-    std::shared_ptr<std::string>,
-    std::shared_ptr<json>,
-    std::shared_ptr<int>,
-    std::shared_ptr<double>,
-    std::shared_ptr<sentinel>
-> EdgeData;
-
-typedef boost::variant<
-    BlockingConcurrentQueue <std::shared_ptr<std::string>>*,
-    BlockingConcurrentQueue <std::shared_ptr<json>>*,
-    BlockingConcurrentQueue <std::shared_ptr<int>>*,
-    BlockingConcurrentQueue <std::shared_ptr<double>>*,
-    sentinel
-    > Edge;
-
-class QDispatchVisitor: public boost::static_visitor<> {
-public:
-    EdgeData input_buffer;
-
-    QDispatchVisitor(EdgeData input_buffer) : input_buffer{input_buffer} {};
-
-    template <typename T>
-    void operator()(T & queue) const {
-        std::cout << "Visiting: " << type_name2< decltype(queue)>() << std::endl;
-        //queue->try_enqueue_bulk(&input_buffer, 1);
-    }
-};
-
-template<>
-void QDispatchVisitor::operator()(sentinel &queue) const {
-    std::cout << "Visitor found a sentinel! This is unexpected" << std::endl;
-}
-
-class StageAdapterExt : public StageAdapterBase {
-public:
-    std::string output_type;
-    std::vector<std::shared_ptr<BlockingConcurrentQueue<EdgeData>>> inputs;
-    std::vector<std::shared_ptr<BlockingConcurrentQueue<EdgeData>>> subscribers;
-
-    std::atomic<unsigned int> running;
-    std::atomic<unsigned int> initialized;
-
-    EdgeData data_buffer;
-
-    unsigned int processed = 0;
-    unsigned int input_buffer_size = 1;
-    unsigned int output_buffer_size = 1;
-    unsigned int max_queue_size = 6 * (2 << 15);
-    unsigned int read_count = 0;
-
-    ~StageAdapterExt() = default;
-
-    StageAdapterExt() : running{0}, initialized{0}, inputs(), subscribers() {};
-
-    void init() override {};
-
-    void pump() override {};
-
-    unsigned int queue_size() override { return 0; }
-};
-
-class FileSourceAdapterExt : public StageAdapterExt {
-public:
-    std::string connection_string;
-    std::string data_debug; // TODO: only for testing
-    std::fstream input_file_stream;
-
-    FileSourceAdapterExt() : StageAdapterExt() {};
-
-    void init() override final {
-        input_file_stream = std::fstream();
-        input_file_stream.open(connection_string);
-
-        //TODO: For debugging
-        std::getline(input_file_stream, data_debug);
-    };
-
-    void pump() override final {
-        data_buffer = EdgeData(std::shared_ptr<std::string> (new std::string(data_debug)));
-        //this->read_count = this->input->wait_dequeue_bulk_timed(&data_buffer,
-        //                                                        1, std::chrono::milliseconds(10));
-        for (auto sub = this->subscribers.begin(); sub != this->subscribers.end(); sub++) {
-            //std::cout << type_name2<decltype((*sub).get())>() << std::endl;
-            //std::cout << type_name2<decltype(data_buffer)>() << std::endl;
-            //boost::apply_visitor(dispatch_visitor, *(*sub).get());
-            while (this->running and not (*sub)->try_enqueue_bulk(&data_buffer, this->input_buffer_size) ) {
-                boost::this_fiber::yield();
-            };
-        }
-        std::this_thread::sleep_for(std::chrono::seconds(5));
-
-        this->processed += 1;
-    };
-
-    unsigned int queue_size() override final {
-        //return this->output_buffer->size_approx();
-        return 0;
-    };
-};
-
-class MapAdapterExt : public StageAdapterExt {
-public:
-    MapAdapterExt() : StageAdapterExt() {};
-
-    std::vector<EdgeData> input_buffers;
-
-    void pump() override {
-        // TODO
-        std::vector<EdgeData> buffers;
-        for (auto in = this->inputs.begin(); in != this->inputs.end(); in++) {
-            this->read_count = 0;
-            EdgeData buffer;
-            while (this->running == 1) {
-                this->read_count = (*in)->wait_dequeue_bulk_timed(&buffer, this->input_buffer_size,
-                                                                        std::chrono::milliseconds(10));
-                if (this->read_count > 0) {
-                    break;
-                }
-
-                boost::this_fiber::yield();
-            };
-
-            buffers.push_back(buffer);
-        }
-
-        std::cout << "Got an input pack" << std::endl;
-
-        // Call function that takes vector input
-        /*
-        this->read_count = this->input->wait_dequeue_bulk_timed(&buffer,
-                                                                this->input_buffer_size, std::chrono::milliseconds(10));
-        if (this->read_count > 0) {
-            this->output_buffer = std::shared_ptr<OutputType>(map(this->input_buffer.get()));
-            while (this->running == 1 &&
-                   not(this->output->try_enqueue_bulk(&this->output_buffer, this->output_buffer_size))) {
-                boost::this_fiber::yield();
-                //std::this_thread::sleep_for(std::chrono::nanoseconds(100));
-            };
-
-            this->processed += 1;
-        }
-        */
-    }
-};
-
 
 template<class InputType, class OutputType>
 class StageAdapter : public StageAdapterBase {
@@ -281,7 +77,6 @@ public:
         return output;
     }
 };
-
 
 
 class FileSourceAdapter : public StageAdapter<void, std::string> {
