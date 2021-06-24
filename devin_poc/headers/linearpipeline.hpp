@@ -55,6 +55,7 @@ struct TaskStats {
     std::chrono::time_point <std::chrono::steady_clock> last_visited;
 };
 
+
 class LinearPipeline {
 public:
     enum StageType {

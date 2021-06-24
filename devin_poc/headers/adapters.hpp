@@ -8,9 +8,33 @@
 #include <taskflow/taskflow.hpp>
 
 #include <boost/fiber/all.hpp>
+#include <boost/variant.hpp>
 
 #ifndef TASKFLOW_ADAPTERS_HPP
 #define TASKFLOW_ADAPTERS_HPP
+
+template<typename T>
+constexpr auto type_name2() noexcept {
+std::string_view name = "Error: unsupported compiler", prefix, suffix;
+#ifdef __clang__
+name = __PRETTY_FUNCTION__;
+              prefix = "auto type_name() [T = ";
+              suffix = "]";
+#elif defined(__GNUC__)
+name = __PRETTY_FUNCTION__;
+              prefix = "constexpr auto type_name() [with T = ";
+              suffix = "]";
+#elif defined(_MSC_VER)
+name = __FUNCSIG__;
+              prefix = "auto __cdecl type_name<";
+              suffix = ">(void) noexcept";
+#endif
+name.remove_prefix(prefix.size());
+name.remove_suffix(suffix.size());
+
+return name;
+}
+
 
 using namespace moodycamel;
 using namespace nlohmann;
@@ -25,6 +49,141 @@ public:
 
     virtual unsigned int queue_size() = 0;
 };
+
+// Class: MapItem
+template <typename KeyT, typename ValueT>
+class MapItem {
+
+public:
+    using KeyType = std::conditional_t <std::is_lvalue_reference_v<KeyT>, KeyT, std::decay_t<KeyT>>;
+    using ValueType = std::conditional_t <std::is_lvalue_reference_v<ValueT>, ValueT, std::decay_t<ValueT>>;
+
+    MapItem(KeyT&& k, ValueT&& v) : _key(std::forward<KeyT>(k)), _value(std::forward<ValueT>(v)) {}
+    MapItem& operator = (const MapItem&) = delete;
+
+    inline const KeyT& key() const { return _key; }
+    inline const ValueT& value() const { return _value; }
+
+    template <typename ArchiverT>
+    auto save(ArchiverT & ar) const { return ar(_key, _value); }
+
+    template <typename ArchiverT>
+    auto load(ArchiverT & ar) { return ar(_key, _value); }
+
+private:
+
+    KeyType _key;
+    ValueType _value;
+};
+
+// Function: make_kv_pair
+template <typename KeyT, typename ValueT>
+MapItem<KeyT, ValueT> make_kv_pair(KeyT&& k, ValueT&& v) {
+    return { std::forward<KeyT>(k), std::forward<ValueT>(v) };
+}
+
+
+struct sentinel {};
+
+typedef boost::variant<
+std::shared_ptr<std::string>,
+std::shared_ptr<json>,
+std::shared_ptr<int>,
+std::shared_ptr<double>
+> EdgeData;
+
+typedef boost::variant<
+    BlockingConcurrentQueue <std::shared_ptr<std::string>>*,
+    BlockingConcurrentQueue <std::shared_ptr<json>>*,
+    BlockingConcurrentQueue <std::shared_ptr<int>>*,
+    BlockingConcurrentQueue <std::shared_ptr<double>>*,
+    sentinel
+    > Edge;
+
+class QDispatchVisitor: public boost::static_visitor<> {
+public:
+    EdgeData input_buffer;
+
+    QDispatchVisitor(EdgeData input_buffer) : input_buffer{input_buffer} {};
+
+    template <typename T>
+    void operator()(T & queue) const {
+        std::cout << "Visiting: " << type_name2< decltype(queue)>() << std::endl;
+        //queue->try_enqueue_bulk(&input_buffer, 1);
+    }
+};
+
+template<>
+void QDispatchVisitor::operator()(sentinel &queue) const {
+    std::cout << "Visitor found a sentinel! This is unexpected" << std::endl;
+}
+
+
+class StageAdapterExt : public StageAdapterBase {
+public:
+    std::string output_type;
+    std::shared_ptr<Edge> output_buffer;
+    std::vector<std::shared_ptr<Edge>> inputs;
+    std::vector<std::shared_ptr<Edge>> subscribers;
+    std::atomic<unsigned int> running;
+    std::atomic<unsigned int> initialized;
+
+    EdgeData data_buffer;
+    QDispatchVisitor dispatch_visitor;
+
+    unsigned int processed = 0;
+    unsigned int input_buffer_size = 1;
+    unsigned int output_buffer_size = 1;
+    unsigned int max_queue_size = 6 * (2 << 15);
+
+    ~StageAdapterExt() = default;
+
+    StageAdapterExt(Edge *buffer) : running{0}, initialized{0}, inputs(), subscribers(),
+                                    dispatch_visitor(data_buffer) {
+        output_buffer = std::shared_ptr<Edge>(buffer);
+    };
+
+    void init() override {};
+
+    void pump() override {};
+
+    unsigned int queue_size() override { return 0; }
+};
+
+class FileSourceAdapterExt : public StageAdapterExt {
+public:
+    std::string connection_string;
+    std::string data_debug; // TODO: only for testing
+    std::fstream input_file_stream;
+
+    FileSourceAdapterExt(Edge *edge) : StageAdapterExt(edge) {};
+
+    void init() override final {
+        input_file_stream = std::fstream();
+        input_file_stream.open(connection_string);
+
+        //TODO: For debugging
+        std::getline(input_file_stream, data_debug);
+    };
+
+    void pump() override final {
+        data_buffer = std::shared_ptr<std::string>(new std::string(data_debug));
+        for (auto sub = this->subscribers.begin(); sub != this->subscribers.end(); sub++) {
+            //std::cout << type_name2<decltype(*((*sub).get()))>() << std::endl;
+
+            boost::apply_visitor(dispatch_visitor, *(*sub).get());
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+        }
+
+        this->processed += 1;
+    };
+
+    unsigned int queue_size() override final {
+        return 0;
+        //return this->output_buffer->size_approx();
+    };
+};
+
 
 template<class InputType, class OutputType>
 class StageAdapter : public StageAdapterBase {
@@ -75,6 +234,8 @@ public:
         return output;
     }
 };
+
+
 
 class FileSourceAdapter : public StageAdapter<void, std::string> {
 public:
