@@ -8,6 +8,8 @@
 #include <boost/fiber/all.hpp>
 #include <boost/variant.hpp>
 
+#include <blockingconcurrentqueue.h>
+
 #ifndef TASKFLOW_COMMON_HPP
 #define TASKFLOW_COMMON_HPP
 template<typename T>
@@ -35,11 +37,19 @@ return name;
 struct sentinel {};
 
 typedef boost::variant<
-std::shared_ptr<std::string>,
-std::shared_ptr<nlohmann::json>,
-std::shared_ptr<int>,
-std::shared_ptr<double>,
-std::shared_ptr<sentinel>
+    std::shared_ptr<std::string>,
+    std::shared_ptr<nlohmann::json>,
+    std::shared_ptr<int>,
+    std::shared_ptr<double>,
+    std::shared_ptr<sentinel>
+> PrimitiveVariant;
+
+typedef boost::variant<
+    PrimitiveVariant,
+    std::vector<PrimitiveVariant>
 > DataVariant;
+
+typedef moodycamel::BlockingConcurrentQueue < DataVariant> Edge;
+typedef std::shared_ptr<moodycamel::BlockingConcurrentQueue < DataVariant>> EdgePtr;
 
 #endif //TASKFLOW_COMMON_HPP

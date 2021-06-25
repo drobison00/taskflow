@@ -34,12 +34,24 @@ The current Pipeline architecture is designed around both an underlying taskflow
   source should be first (no checking for this currently).
     - Operations:
         - **source** 
-        - **filter** - (TODO)
-        - **map** - signature: map(DataVariant(\*myfunc)(std::vector<DataVariant>)). 
-        - **explode** - (TODO) 
-        - **batch** - (TODO) 
+        - **batch** - signature (count, timeout) .. parity with **sliding_window**
+        - **buffer** - Uncessary (?) back pressure is handled automatically.
+        - **collect** - Use case isn't entirely clear, parity can be achieved with **batch**
+        - **combine_latest** - (TODO)
+        - **delay** - (TODO) parity with passthrough filter with delay
+        - **filter** - Done
+        - **flatten** - (TODO) - reverse batch
+        - **map** - Done
+        - **partition** - (TODO) parity with **batch**
+        - **rate_limit** - (TODO) parity with a passthrough filter with stateful rate 
         - **sink** - signature(void(\*myfunc)(std::vector<DataVariant>)) - will receive a std::vecto of DataVariants
           and can do whatever is required to retire them from the pipeline.
+        - **sliding_window** (TODO) parity with **batch** if we allow for windowing.
+        - **union** (TODO) parity with map
+        - **unique** (TODO) probably a stateful specialization of filter.
+        - **pluck** (TODO) parity with filter
+        - **zip** (TODO) parity with map
+
 ```
 g++ -g -std=c++17 devin_poc/pipeline_example.cpp -I ./ -I ../json/include -I ../concurrentqueue -I devin_poc/headers/ -lboost_fiber -lboost_context -O2 -pthread -o taskflow_test
 ```

@@ -11,6 +11,8 @@
 #include <boost/fiber/all.hpp>
 #include <boost/variant.hpp>
 
+#include <example_task_funcs.hpp>
+
 using namespace moodycamel;
 using namespace nlohmann;
 
@@ -51,23 +53,20 @@ namespace taskflow_pipeline {
         return {std::forward<KeyT>(k), std::forward<ValueT>(v)};
     }
 
-    class QDispatchVisitor : public boost::static_visitor<> {
+    class BatchingVisitor : public boost::static_visitor<> {
     public:
-        //DataVariant input_buffer;
+        DataVariant v;
 
-        //QDispatchVisitor(DataVariant input_buffer) : input_buffer{input_buffer} {};
+        template<typename VariantType>
+        void operator()(VariantType &data) const {
 
-        template<typename T>
-        void operator()(T &queue) const {
-            std::cout << "Visiting: " << type_name<decltype(queue)>() << std::endl;
-            //queue->try_enqueue_bulk(&input_buffer, 1);
         }
     };
 
-    template<>
+    /*template<>
     void QDispatchVisitor::operator()(sentinel &queue) const {
         std::cout << "Visitor found a sentinel! This is unexpected" << std::endl;
-    }
+    }*/
 
     /*
     class QParseToJsonVisitor : public boost:static_visitor<> {
@@ -87,25 +86,28 @@ namespace taskflow_pipeline {
 
         virtual void pump() = 0;
 
+        virtual void dispatch() = 0;
+
+        virtual void add_input(std::string input_name, EdgePtr input) = 0;
+
+        virtual void add_subscriber(std::string sub_name, EdgePtr sub) = 0;
+
         virtual unsigned int queue_size() = 0;
     };
 
     class StageAdapterExt : public StageAdapterBaseExt {
     public:
         unsigned int type_id = 0;
+        unsigned int input_limit = 1;
+
         std::string name;
-        std::string output_type;
         std::vector<std::string> input_names;
         std::vector<std::string> subscriber_names;
-        std::vector <std::shared_ptr<BlockingConcurrentQueue < DataVariant>>>
-        inputs;
-        std::vector <std::shared_ptr<BlockingConcurrentQueue < DataVariant>>>
-        subscribers;
+        std::vector <EdgePtr> inputs;
+        std::vector <EdgePtr> subscribers;
 
         std::atomic<unsigned int> running;
         std::atomic<unsigned int> initialized;
-
-        DataVariant data_buffer;
 
         unsigned int processed = 0;
         unsigned int input_buffer_size = 1;
@@ -119,11 +121,80 @@ namespace taskflow_pipeline {
 
         };
 
+        void add_input(std::string input_name, EdgePtr input) override {
+            if (input_limit > 0 and (inputs.size() == input_limit)) {
+                std::stringstream sstream;
+                sstream << "Adapter: [" << name << "] does not support more than " <<  input_limit << " input(s).\n";
+                std::cerr << sstream.str();
+
+                throw(sstream.str());
+            }
+
+            // TODO: check for attempts to add same edge more than once
+
+            inputs.push_back(input);
+        };
+
+        void add_subscriber(std::string sub_name, EdgePtr sub) override {
+            subscriber_names.push_back(sub_name);
+            subscribers.push_back(sub);
+        };
+
         void init() override {};
 
         void pump() override {};
 
+        void dispatch() override {};
+
         unsigned int queue_size() override { return 0; }
+    };
+
+    class BatchAdapterExt : public StageAdapterExt {
+    public:
+        unsigned int batch_size;
+        unsigned int timeout_ms;
+
+        BatchAdapterExt(unsigned int batch_size, unsigned int timeout_ms) : batch_size{batch_size},
+            timeout_ms{timeout_ms}, StageAdapterExt() {};
+
+        void pump() override {
+            // Pump shouldn't use any mutable shared state
+            unsigned int read_count;
+            DataVariant data_buffer[batch_size];
+            DataVariant output_buffer;
+            std::vector<PrimitiveVariant> batch;
+
+            auto in = inputs[0];
+            while (this->running == 1) {
+                read_count = in->wait_dequeue_bulk_timed(&data_buffer[0], batch_size, std::chrono::milliseconds(10));
+                if (read_count > 0) {
+                    break;
+                }
+
+                boost::this_fiber::yield();
+            };
+
+            for (int i = 0; i < read_count; i++) {
+                //batch.push_back(data_buffer[i]);
+            }
+
+            std::stringstream sstream;
+            sstream << "[" << this->name << "] Got Input Pack" << std::endl;
+            std::cout << sstream.str();
+
+            output_buffer = batch;
+            for (auto sub = this->subscribers.begin(); sub != this->subscribers.end(); sub++) {
+                //std::cout << type_name<decltype((*sub).get())>() << std::endl;
+                //std::cout << type_name<decltype(data_buffer)>() << std::endl;
+                //boost::apply_visitor(dispatch_visitor, *(*sub).get());
+                while (this->running and
+                       not (*sub)->try_enqueue_bulk(&output_buffer, this->input_buffer_size)) {
+                    boost::this_fiber::yield();
+                };
+            }
+
+            this->processed++;
+        }
     };
 
     class FileSourceAdapterExt : public StageAdapterExt {
@@ -168,38 +239,52 @@ namespace taskflow_pipeline {
         };
     };
 
+    class MapVisitor: public boost::static_visitor<DataVariant> {
+    public:
+        std::function<PrimitiveVariant(PrimitiveVariant)> map;
+
+        MapVisitor(std::function<PrimitiveVariant(PrimitiveVariant)> map) : map{map} {};
+
+        DataVariant operator()(PrimitiveVariant &v) const {
+            DataVariant x = map(v);
+            return x;
+        }
+
+        DataVariant operator()(std::vector<PrimitiveVariant> &v_vec) const {
+            std::vector<PrimitiveVariant> ret;
+            for(auto it = v_vec.begin(); it != v_vec.end(); it++) {
+                ret.push_back(map(*it));
+            }
+
+            DataVariant d = ret;
+            return d;
+        }
+    };
+
     class MapAdapterExt : public StageAdapterExt {
     public:
-        MapAdapterExt (DataVariant(*map)(std::vector <DataVariant>)) : map{ map },
+        MapAdapterExt (MapVisitor visitor) : visitor { visitor }, StageAdapterExt() {};
 
-        StageAdapterExt() {};
-
-        std::function<DataVariant(std::vector < DataVariant > )> map;
-        std::vector <DataVariant> input_buffers;
+         MapVisitor visitor;
 
         void pump() override {
             DataVariant data_buffer;
-            std::vector <DataVariant> buffers;
-            for (auto in = this->inputs.begin(); in != this->inputs.end(); in++) {
-                this->read_count = 0;
-                DataVariant buffer;
-                while (this->running == 1) {
-                    this->read_count = (*in)->wait_dequeue_bulk_timed(&buffer, this->input_buffer_size,
-                                                                      std::chrono::milliseconds(10));
-                    if (this->read_count > 0) {
-                        break;
-                    }
+            unsigned int read_count;
 
-                    boost::this_fiber::yield();
-                };
+            auto in = inputs[0];
+            while (this->running == 1) {
+                read_count = in->wait_dequeue_bulk_timed(&data_buffer, this->input_buffer_size,
+                                                                  std::chrono::milliseconds(10));
+                if (read_count > 0) { break; }
 
-                buffers.push_back(buffer);
-            }
+                boost::this_fiber::yield();
+            };
+
             std::stringstream sstream;
             sstream << "[" << this->name << "] Got Input Pack" << std::endl;
             std::cout << sstream.str();
 
-            data_buffer = map(buffers);
+            data_buffer = boost::apply_visitor(visitor, data_buffer);
 
             for (auto sub = this->subscribers.begin(); sub != this->subscribers.end(); sub++) {
                 //std::cout << type_name<decltype((*sub).get())>() << std::endl;
@@ -209,25 +294,172 @@ namespace taskflow_pipeline {
                     boost::this_fiber::yield();
                 };
             }
+
+            this->processed++;
         }
     };
 
-    class SinkAdapterExt : public StageAdapterExt {
+    class FlatMapVisitor: public boost::static_visitor<std::vector<DataVariant>> {
     public:
-        SinkAdapterExt (void(*sink)(std::vector <DataVariant>)) : sink{ sink },
+        std::function<std::vector<PrimitiveVariant>(PrimitiveVariant)> flat_map;
 
-        StageAdapterExt() {};
+        FlatMapVisitor(std::function<std::vector<PrimitiveVariant>(PrimitiveVariant)> flat_map) :
+            flat_map{flat_map} {};
 
-        std::function<void(std::vector < DataVariant > )> sink;
-        std::vector <DataVariant> input_buffers;
+        std::vector<DataVariant> up_convert(std::vector<PrimitiveVariant> v) const {
+            std::vector<DataVariant> ret;
+
+            for (auto it = v.begin(); it != v.end(); it++) {
+                ret.push_back(*it);
+            }
+
+            return ret;
+        }
+
+        // Unpacked types from DataVariant: PrimitiveVariant or std::vector<PrimitiveVariant>
+        std::vector<DataVariant> operator()(PrimitiveVariant &v) const {
+            return up_convert(flat_map(v));
+        }
+
+        std::vector<DataVariant> operator()(std::vector<PrimitiveVariant> &v_vec) const {
+            std::vector<DataVariant> ret;
+
+            for(auto it = v_vec.begin(); it != v_vec.end(); it++) {
+                ret.push_back(flat_map(*it));
+            }
+
+            return ret;
+        }
+    };
+
+    class FlatMapAdapterExt : public StageAdapterExt {
+    public:
+        FlatMapAdapterExt(FlatMapVisitor visitor) : visitor{visitor}, StageAdapterExt() {};
+
+        FlatMapVisitor visitor;
 
         void pump() override {
+            unsigned int read_count = 0;
             DataVariant data_buffer;
+            std::vector<DataVariant> output_buffer;
+
+            auto in = inputs[0];
+            while (this->running == 1) {
+                read_count = in->wait_dequeue_bulk_timed(&data_buffer, this->input_buffer_size,
+                                                         std::chrono::milliseconds(10));
+                if (read_count > 0) {
+                    break;
+                }
+
+                boost::this_fiber::yield();
+            };
+
+            std::stringstream sstream;
+            sstream << "[" << this->name << "] Got Input Pack" << std::endl;
+            std::cout << sstream.str();
+
+            output_buffer = boost::apply_visitor(visitor, data_buffer);
+
+            for (auto data = output_buffer.begin(); data != output_buffer.end(); data++) {
+                data_buffer = *data;
+                for (auto sub = this->subscribers.begin(); sub != this->subscribers.end(); sub++) {
+                    //std::cout << type_name<decltype((*sub).get())>() << std::endl;
+                    //std::cout << type_name<decltype(data_buffer)>() << std::endl;
+                    //boost::apply_visitor(dispatch_visitor, *(*sub).get());
+                    while (this->running and
+                           not(*sub)->try_enqueue_bulk(&data_buffer, this->input_buffer_size)) {
+                        boost::this_fiber::yield();
+                    };
+                }
+            }
+
+            this->processed++;
+        }
+    };
+
+    class FilterVisitor: public boost::static_visitor<bool> {
+    public:
+        std::function<bool(PrimitiveVariant)> filter;
+
+        FilterVisitor(std::function<bool(PrimitiveVariant)> filter) : filter{filter} {};
+
+        bool operator()(PrimitiveVariant &v) const {
+            return filter(v);
+        }
+
+        bool operator()(std::vector<PrimitiveVariant> &v_vec) const {
+            for(auto it = v_vec.begin(); it != v_vec.end(); it++) {
+                // TODO: think more about filtering batches
+                if (not filter(*it)) {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+    };
+
+    class FilterAdapterExt : public StageAdapterExt {
+    public:
+        FilterVisitor visitor;
+
+        FilterAdapterExt(FilterVisitor visitor) : visitor{ visitor }, StageAdapterExt() {};
+
+        void pump() override {
+            // Pump shouldn't use any mutable shared state
+            unsigned int read_count;
+            DataVariant data_buffer;
+
+            auto in = inputs[0];
+            while (this->running == 1) {
+                read_count = in->wait_dequeue_bulk_timed(&data_buffer, this->input_buffer_size,
+                                                                  std::chrono::milliseconds(10));
+                if (read_count > 0) {
+                    break;
+                }
+
+                boost::this_fiber::yield();
+            };
+
+            std::stringstream sstream;
+            sstream << "[" << this->name << "] Got Input Pack" << std::endl;
+            std::cout << sstream.str();
+
+            if (boost::apply_visitor(visitor, data_buffer)) {
+                for (auto sub = this->subscribers.begin(); sub != this->subscribers.end(); sub++) {
+                    //std::cout << type_name<decltype((*sub).get())>() << std::endl;
+                    //std::cout << type_name<decltype(data_buffer)>() << std::endl;
+                    //boost::apply_visitor(dispatch_visitor, *(*sub).get());
+                    while (this->running and
+                           not (*sub)->try_enqueue_bulk(&data_buffer, this->input_buffer_size)) {
+                        boost::this_fiber::yield();
+                    };
+                }
+            }
+
+            this->processed++;
+        }
+    };
+
+
+    // TODO
+    /*
+    class UniqueAdapterExt : public StageAdapterExt {
+    public:
+        UniqueAdapterExt(unsigned int max_size) : max_history_size{max_size}, StageAdapterExt() {};
+
+        unsigned int max_history_size = 1;
+        std::vector <DataVariant> input_buffers;
+        std::vector <DataVariant> history;
+
+        void pump() override {
+            // TODO: this probably isn't right. Filter shouldn't be applied to multiple input streams.
+            //  Probably should check some criteria at a higher level based on number of input streams and
+            //  subscribers
             for (auto in = this->inputs.begin(); in != this->inputs.end(); in++) {
                 this->read_count = 0;
-                DataVariant buffer;
                 while (this->running == 1) {
-                    this->read_count = (*in)->wait_dequeue_bulk_timed(&buffer, this->input_buffer_size,
+                    this->read_count = in->wait_dequeue_bulk_timed(&this->data_buffer, this->input_buffer_size,
                                                                       std::chrono::milliseconds(10));
                     if (this->read_count > 0) {
                         break;
@@ -236,16 +468,85 @@ namespace taskflow_pipeline {
                     boost::this_fiber::yield();
                 };
 
-                input_buffers.push_back(buffer);
+                input_buffers.push_back(this->data_buffer);
+            }
+            std::stringstream sstream;
+            sstream << "[" << this->name << "] Got Input Pack" << std::endl;
+            std::cout << sstream.str();
+
+            for (auto data = input_buffers.begin(); data != input_buffers.end(); data++) {
+                this->data_buffer = *data;
+                for (auto sub = this->subscribers.begin(); sub != this->subscribers.end(); sub++) {
+                    //std::cout << type_name<decltype((*sub).get())>() << std::endl;
+                    //std::cout << type_name<decltype(data_buffer)>() << std::endl;
+                    //boost::apply_visitor(dispatch_visitor, *(*sub).get());
+                    while (this->running and
+                           not(*sub)->try_enqueue_bulk(&this->data_buffer, this->input_buffer_size)) {
+                        boost::this_fiber::yield();
+                    };
+                }
+            }
+            input_buffers.clear();
+        }
+    };
+     */
+
+    class SinkVisitor: public boost::static_visitor<> {
+    public:
+        std::function<void(PrimitiveVariant)> sink;
+
+        SinkVisitor(std::function<void(PrimitiveVariant)> sink) : sink{sink} {};
+
+        void operator()(PrimitiveVariant &v) const {
+            sink(v);
+        }
+
+        void operator()(std::vector<PrimitiveVariant> &v_vec) const {
+            for(auto it = v_vec.begin(); it != v_vec.end(); it++) {
+                sink(*it);
+            }
+        }
+    };
+
+    class SinkAdapterExt : public StageAdapterExt {
+    public:
+        SinkAdapterExt (SinkVisitor visitor) : visitor{ visitor },
+            StageAdapterExt() {
+            this->input_limit = 0; // We can sink any number of things
+        };
+
+        SinkVisitor visitor;
+
+        void pump() override {
+            unsigned int read_count;
+            DataVariant data_buffer;
+            std::vector<DataVariant> output_buffer;
+            for (auto in = this->inputs.begin(); in != this->inputs.end(); in++) {
+                while (this->running == 1) {
+                    read_count = (*in)->wait_dequeue_bulk_timed(&data_buffer, this->input_buffer_size,
+                                                                      std::chrono::milliseconds(10));
+                    if (read_count > 0) {
+                        break;
+                    }
+
+                    boost::this_fiber::yield();
+                };
+                // TODO
+                boost::apply_visitor(visitor, data_buffer);
+                //output_buffer.push_back(data_buffer);
             }
 
             std::stringstream sstream;
             sstream << "[" << this->name << "] Sinking Input Pack" << std::endl;
             std::cout << sstream.str();
 
-            sink(input_buffers);
-            input_buffers.clear();
+            //boost::apply_visitor(visitor, output_buffer);
+
+            this->processed++;
         }
     };
+
+
+
 }
 #endif //TASKFLOW_PIPELINE_ADAPTERS_HPP

@@ -2,46 +2,37 @@
 // Created by drobison on 6/22/21.
 //
 #include <nlohmann/json.hpp>
+#include <common.hpp>
 
 #ifndef TASKFLOW_EXAMPLE_TASK_FUNCS_HPP
 #define TASKFLOW_EXAMPLE_TASK_FUNCS_HPP
 using namespace nlohmann;
 
+PrimitiveVariant map_parse_to_json(const PrimitiveVariant v);
+PrimitiveVariant map_json_to_json(const PrimitiveVariant v);
+PrimitiveVariant map_random_work_on_json_object(const PrimitiveVariant v);
+PrimitiveVariant map_random_trig_work_and_forward(const PrimitiveVariant v);
+std::vector<PrimitiveVariant> flat_map_duplicate(const PrimitiveVariant v);
+PrimitiveVariant multi_map_merge_json(const std::vector<PrimitiveVariant> v);
+void sink_passthrough(const PrimitiveVariant v);
+
+
+
 // Take a single element vector containing a string, and parse to a json object
-DataVariant map_parse_to_json(std::vector <DataVariant> v) {
-    std::shared_ptr<std::string> s = boost::get<std::shared_ptr<std::string>>(v[0]);
+PrimitiveVariant map_parse_to_json(const PrimitiveVariant v)  {
+    std::shared_ptr<std::string> s = boost::get<std::shared_ptr<std::string>>(v);
     //std::cout << "Parsing: " << *s << std::endl;
     return std::shared_ptr<json>(new json(json::parse(*s)));
 }
 
-DataVariant map_merge_json(std::vector<DataVariant> v) {
-    std::shared_ptr<json> j = boost::get<std::shared_ptr<json>>(v[0]);
-    json *merged = new json(*j);
-    for (auto it=v.begin() + 1; it != v.end(); it++) {
-        std::shared_ptr<json> j = boost::get<std::shared_ptr<json>>(*it);
-        merged->merge_patch(*j);
-    }
-
-    return std::shared_ptr<json>(merged);
+PrimitiveVariant map_json_to_json(const PrimitiveVariant v) {
+    return v;
 }
 
-void sink_passthrough(std::vector <DataVariant> v) {}
-
-/*
-// Example worker task
-json *map_string_to_json(std::string *s) {
-    return new json(json::parse(*s));
-}
-
-template<class In, class Out>
-Out* map_passthrough(In *o) {
-    return new Out(*o);
-}
-
-json *map_random_work_on_json_object(json *_j) {
-    json *__j = new json(*_j);
-    json j = *__j;
-
+PrimitiveVariant map_random_work_on_json_object(const PrimitiveVariant v) {
+    auto j_sp = boost::get<std::shared_ptr<json>>(v);
+    json *_j = new json(*j_sp);
+    json &j = *_j;
 
     j["some field"] = "some value";
     j["some list"] = {'a', 'b', 'c'};
@@ -63,18 +54,10 @@ json *map_random_work_on_json_object(json *_j) {
         }
     }
 
-    return __j;
+    return std::shared_ptr<json>(_j);
 }
 
-// Function examples
-
-template<typename InputType>
-bool filter_random_drop(InputType *d) {
-    return std::rand() % 2 == 0;
-};
-
-template<typename DataType>
-DataType *map_random_trig_work(DataType *d) {
+PrimitiveVariant map_random_trig_work_and_forward(const PrimitiveVariant v) {
     double MYPI = 3.14159265;
     int how_many = std::rand() % 100000;
     double random_angle_rads = MYPI * ((double) std::rand() / (double) RAND_MAX);
@@ -86,52 +69,42 @@ DataType *map_random_trig_work(DataType *d) {
         __asm__ __volatile__("inc %[Incr]" : [Incr] "+r"(i));
     }
 
-    return new DataType(*d);
+    return v;
 }
 
-json *map_random_trig_work_json(json *d) {
-    double MYPI = 3.14159265;
-    int how_many = std::rand() % 100000;
-    double random_angle_rads = MYPI * ((double) std::rand() / (double) RAND_MAX);
+std::vector<PrimitiveVariant> flat_map_duplicate(const PrimitiveVariant v) {
+    std::vector<PrimitiveVariant> ret;
 
-    for (int i = 0; i < how_many;) {
-        random_angle_rads = tan(atan(random_angle_rads));
-
-        // Don't let GCC optimize us away
-        __asm__ __volatile__("inc %[Incr]" : [Incr] "+r"(i));
+    for(int i = 0; i < 10; i++){
+        ret.push_back(v);
     }
 
-    return new json();
+    return ret;
 }
 
-std::tuple<json **, unsigned int> exploder_duplicate_json(json *d) {
-    int k = 10;
-    json **out = new json *[k];
-
-    for (int i = 0; i < k; i++) {
-        out[i] = new json(*d);
+PrimitiveVariant multi_map_merge_json(const std::vector<PrimitiveVariant> v) {
+    std::shared_ptr<json> j = boost::get<std::shared_ptr<json>>(v[0]);
+    json *merged = new json(*j);
+    for (auto it=v.begin() + 1; it != v.end(); it++) {
+        std::shared_ptr<json> j = boost::get<std::shared_ptr<json>>(*it);
+        merged->merge_patch(*j);
     }
 
-    return std::tuple(out, k);
+    return std::shared_ptr<json>(merged);
 }
 
+void sink_passthrough(const PrimitiveVariant v) {}
 
-// Kind of redundant. Experimenting on ways to reduce template args in chaining
-template<typename DataType>
-std::tuple<DataType **, unsigned int> exploder_duplicate(DataType *d) {
-    int k = 10;
-    DataType **out = new DataType *[k];
+bool filter_passthrough(const PrimitiveVariant v) {
+    return true;
+}
 
-    for (int i = 0; i < k; i++) {
-        out[i] = new DataType(*d);
+bool filter_random_drop(const PrimitiveVariant v) {
+
+    if (std::rand() % 2 == 0){
+        return true;
     }
-
-    return std::tuple(out, k);
+    return false;
 }
 
-template<typename InputType>
-void sink_discard(InputType *) {
-    return;
-}
- */
 #endif //TASKFLOW_EXAMPLE_TASK_FUNCS_HPP

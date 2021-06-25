@@ -40,28 +40,16 @@ int main(int argc, char **argv) {
 
     Pipeline p(executor);
     p.source("file", "devin_poc/without_data_len.json", "source_input")
-        .map("map_to_json_1", {"source_input"}, map_parse_to_json)
-        .map("map_to_json_2", {"source_input"}, map_parse_to_json)
-        .map("map_json_to_json_1", {"map_to_json_1", "map_to_json_2"}, map_merge_json)
-        .map("map_json_to_json_2", {"map_to_json_2", "map_to_json_1"}, map_merge_json)
-        .map("map_json_to_json_3",
-                  {"map_to_json_2", "map_json_to_json_1", "map_json_to_json_2"},
-                  map_merge_json)
-        .map("map_json_to_json_4",
-                  {"map_to_json_1", "map_json_to_json_2", "map_to_json_2"},
-                  map_merge_json)
-        .map("map_json_to_json_5",
-                  {"map_to_json_1", "map_json_to_json_2", "map_to_json_2"},
-                  map_merge_json)
-        .map("map_json_to_json_6",
-                  {"map_to_json_1", "map_json_to_json_2", "map_to_json_2"},
-                  map_merge_json)
-        .map("map_json_to_json_7",
-                  {"map_to_json_1", "map_json_to_json_2", "map_to_json_2"},
-                  map_merge_json)
-        .sink("sink1", {"map_json_to_json_3", "map_json_to_json_5", "map_json_to_json_6"},
-                  sink_passthrough)
-        .sink("sink2", {"map_json_to_json_7", "map_json_to_json_4"}, sink_passthrough)
+        .map("parse_str_to_json", {"source_input"}, map_parse_to_json)
+        .flat_map("duplicate_json_10x", {"parse_str_to_json"}, flat_map_duplicate)
+        .map("json_mutate", {"duplicate_json_10x"}, map_random_work_on_json_object)
+        .map("trig_work_and_forward_1", {"json_mutate"}, map_random_trig_work_and_forward)
+        .flat_map("duplicate_json_10x_2", {"trig_work_and_forward_1"}, flat_map_duplicate)
+        .filter("random_drop_filter_1", {"duplicate_json_10x_2"}, filter_random_drop)
+        .map("trig_work_and_forward_2", {"random_drop_filter_1"}, map_random_trig_work_and_forward)
+        .flat_map("duplicate_json_10x_3", {"trig_work_and_forward_2"}, flat_map_duplicate)
+        .batch("batch_1", {"duplicate_json_10x_3"}, 10, 10)
+        .sink("sink1", {"batch_1"}, sink_passthrough)
         .build()
         .name("Example taskflow")
         .visualize("graph.dot")
