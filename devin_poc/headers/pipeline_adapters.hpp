@@ -88,6 +88,8 @@ namespace taskflow_pipeline {
 
         virtual void dispatch() = 0;
 
+        virtual void run() = 0;
+
         virtual void add_input(std::string input_name, EdgePtr input) = 0;
 
         virtual void add_subscriber(std::string sub_name, EdgePtr sub) = 0;
@@ -105,6 +107,7 @@ namespace taskflow_pipeline {
         std::vector<std::string> subscriber_names;
         std::vector <EdgePtr> inputs;
         std::vector <EdgePtr> subscribers;
+        std::vector <boost::fibers::fiber> workers;
 
         std::atomic<unsigned int> running;
         std::atomic<unsigned int> initialized;
@@ -140,9 +143,22 @@ namespace taskflow_pipeline {
             subscribers.push_back(sub);
         };
 
-        void init() override {};
+        void init() override {
+            boost::fibers::use_scheduling_algorithm<boost::fibers::algo::shared_work>();
+            this->initialized = 1;
+        };
 
         void pump() override {};
+
+        void run() override {
+            this->running = 1;
+            boost::fibers::fiber(
+                    [this]() {
+                        while (this->running == 1) {
+                            this->pump();
+                        }
+                    }).detach();
+        }
 
         void dispatch() override {};
 
@@ -170,17 +186,15 @@ namespace taskflow_pipeline {
                 if (read_count > 0) {
                     break;
                 }
-
-                boost::this_fiber::yield();
             };
 
             for (int i = 0; i < read_count; i++) {
                 //batch.push_back(data_buffer[i]);
             }
 
-            std::stringstream sstream;
-            sstream << "[" << this->name << "] Got Input Pack" << std::endl;
-            std::cout << sstream.str();
+            //std::stringstream sstream;
+            //sstream << "[" << this->name << "] Got Input Pack" << std::endl;
+            //std::cout << sstream.str();
 
             output_buffer = batch;
             for (auto sub = this->subscribers.begin(); sub != this->subscribers.end(); sub++) {
@@ -189,7 +203,6 @@ namespace taskflow_pipeline {
                 //boost::apply_visitor(dispatch_visitor, *(*sub).get());
                 while (this->running and
                        not (*sub)->try_enqueue_bulk(&output_buffer, this->input_buffer_size)) {
-                    boost::this_fiber::yield();
                 };
             }
 
@@ -212,6 +225,7 @@ namespace taskflow_pipeline {
 
             //TODO: For debugging
             std::getline(input_file_stream, data_debug);
+            this->initialized = 1;
         };
 
         void pump() override final {
@@ -225,10 +239,9 @@ namespace taskflow_pipeline {
                 //boost::apply_visitor(dispatch_visitor, *(*sub).get());
                 //std::cout << "Pushing: " << *ptr << std::endl;
                 while (this->running and not(*sub)->try_enqueue_bulk(&buffer, this->input_buffer_size)) {
-                    boost::this_fiber::yield();
                 };
             }
-            std::this_thread::sleep_for(std::chrono::seconds(5));
+            //std::this_thread::sleep_for(std::chrono::seconds(5));
 
             this->processed += 1;
         };
@@ -265,7 +278,7 @@ namespace taskflow_pipeline {
     public:
         MapAdapterExt (MapVisitor visitor) : visitor { visitor }, StageAdapterExt() {};
 
-         MapVisitor visitor;
+        MapVisitor visitor;
 
         void pump() override {
             DataVariant data_buffer;
@@ -276,13 +289,11 @@ namespace taskflow_pipeline {
                 read_count = in->wait_dequeue_bulk_timed(&data_buffer, this->input_buffer_size,
                                                                   std::chrono::milliseconds(10));
                 if (read_count > 0) { break; }
-
-                boost::this_fiber::yield();
             };
 
-            std::stringstream sstream;
-            sstream << "[" << this->name << "] Got Input Pack" << std::endl;
-            std::cout << sstream.str();
+            //std::stringstream sstream;
+            //sstream << "[" << this->name << "] Got Input Pack" << std::endl;
+            //std::cout << sstream.str();
 
             data_buffer = boost::apply_visitor(visitor, data_buffer);
 
@@ -291,7 +302,6 @@ namespace taskflow_pipeline {
                 //std::cout << type_name<decltype(data_buffer)>() << std::endl;
                 //boost::apply_visitor(dispatch_visitor, *(*sub).get());
                 while (this->running and not(*sub)->try_enqueue_bulk(&data_buffer, this->input_buffer_size)) {
-                    boost::this_fiber::yield();
                 };
             }
 
@@ -350,13 +360,11 @@ namespace taskflow_pipeline {
                 if (read_count > 0) {
                     break;
                 }
-
-                boost::this_fiber::yield();
             };
 
-            std::stringstream sstream;
-            sstream << "[" << this->name << "] Got Input Pack" << std::endl;
-            std::cout << sstream.str();
+            //std::stringstream sstream;
+            //sstream << "[" << this->name << "] Got Input Pack" << std::endl;
+            //std::cout << sstream.str();
 
             output_buffer = boost::apply_visitor(visitor, data_buffer);
 
@@ -368,7 +376,6 @@ namespace taskflow_pipeline {
                     //boost::apply_visitor(dispatch_visitor, *(*sub).get());
                     while (this->running and
                            not(*sub)->try_enqueue_bulk(&data_buffer, this->input_buffer_size)) {
-                        boost::this_fiber::yield();
                     };
                 }
             }
@@ -417,13 +424,11 @@ namespace taskflow_pipeline {
                 if (read_count > 0) {
                     break;
                 }
-
-                boost::this_fiber::yield();
             };
 
-            std::stringstream sstream;
-            sstream << "[" << this->name << "] Got Input Pack" << std::endl;
-            std::cout << sstream.str();
+            //std::stringstream sstream;
+            //sstream << "[" << this->name << "] Got Input Pack" << std::endl;
+            //std::cout << sstream.str();
 
             if (boost::apply_visitor(visitor, data_buffer)) {
                 for (auto sub = this->subscribers.begin(); sub != this->subscribers.end(); sub++) {
@@ -432,7 +437,6 @@ namespace taskflow_pipeline {
                     //boost::apply_visitor(dispatch_visitor, *(*sub).get());
                     while (this->running and
                            not (*sub)->try_enqueue_bulk(&data_buffer, this->input_buffer_size)) {
-                        boost::this_fiber::yield();
                     };
                 }
             }
@@ -528,17 +532,15 @@ namespace taskflow_pipeline {
                     if (read_count > 0) {
                         break;
                     }
-
-                    boost::this_fiber::yield();
                 };
                 // TODO
                 boost::apply_visitor(visitor, data_buffer);
                 //output_buffer.push_back(data_buffer);
             }
 
-            std::stringstream sstream;
-            sstream << "[" << this->name << "] Sinking Input Pack" << std::endl;
-            std::cout << sstream.str();
+            //std::stringstream sstream;
+            //sstream << "[" << this->name << "] Sinking Input Pack" << std::endl;
+            //std::cout << sstream.str();
 
             //boost::apply_visitor(visitor, output_buffer);
 

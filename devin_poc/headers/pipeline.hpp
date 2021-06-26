@@ -38,22 +38,65 @@ namespace taskflow_pipeline {
         tf::Taskflow pipeline;
         tf::Executor &service_executor;
 
-        Pipeline(tf::Executor &executor) : service_executor{executor} {
-            boost::fibers::use_scheduling_algorithm<boost::fibers::algo::shared_work>();
+        std::vector<std::thread> fiber_threadpool;
+        boost::fibers::condition_variable_any fiber_pool_cond_signal;
+        boost::fibers::mutex fiber_pool_mutex;
+
+        Pipeline(tf::Executor &executor, unsigned int n_threads=-1) : fiber_pool_mutex{},
+            fiber_pool_cond_signal{}, service_executor{executor} {
             task_map = std::map<std::string, tf::Task>();
             adapter_map = std::map < std::string, std::shared_ptr < StageAdapterExt >> ();
 
             pipeline.name(_name);
 
-            auto init = pipeline.emplace([]() {}).name("init");
+            auto init = pipeline.emplace([]() {
+                boost::fibers::use_scheduling_algorithm<boost::fibers::algo::shared_work>();
+            }).name("init");
             task_map[std::string("__init")] = init;
 
             auto shutdown = pipeline.emplace([]() {}).name("end");
             task_map[std::string("__end")] = shutdown;
+
+            // Setup fiber threadpool.
+            if (n_threads == -1) {
+                n_threads = std::thread::hardware_concurrency();
+            }
+            n_threads = std::max(n_threads, (unsigned int)1);
+            std::cout << "Creating threadpool with " << n_threads << " threads." << std::endl;
+
+            std::cout << "???" << std::endl;
+
+            boost::fibers::barrier fiber_init_barrier{n_threads};
+            for (int i = 1; i < n_threads; i++) {
+                auto worker = std::thread([this, &fiber_init_barrier, n_threads, i]() {
+                    std::stringstream sstream;
+                    boost::fibers::use_scheduling_algorithm<boost::fibers::algo::shared_work>();
+                    sstream << "Fiber lead " << i << " waiting on barrier." << std::endl;
+                    std::cout << sstream.str();
+                    sstream.str("");
+                    fiber_init_barrier.wait();
+                    this->fiber_pool_mutex.lock();
+                    // mtx is unlocked on .wait, and will be acquired again before wait can return.
+                    sstream << "Fiber lead " << i << " blocking." << std::endl;
+                    std::cout << sstream.str();
+                    sstream.str("");
+                    this->fiber_pool_cond_signal.wait(this->fiber_pool_mutex);
+                    sstream << "Thread " << i << " terminating." << std::endl;
+                    std::cout << sstream.str();
+                    this->fiber_pool_mutex.unlock();
+                });
+                fiber_threadpool.push_back(std::move(worker));
+            }
+            boost::fibers::use_scheduling_algorithm<boost::fibers::algo::shared_work>();
+            fiber_init_barrier.wait();
+
+            std::stringstream sstream;
+            sstream << "Fiber pool initialized, " << fiber_threadpool.size() << " running threads\n";
+            std::cout << sstream.str();
         }
 
-
         Pipeline &build() {
+            std::cout << "Building!" << std::endl;
             service_executor.run(pipeline).wait();
             pstate = initialized;
 
@@ -64,6 +107,34 @@ namespace taskflow_pipeline {
             pipeline_running = 1;
 
             service_executor.run(pipeline).wait();
+
+            unsigned int freq_ms = 33;
+            std::stringstream sstream;
+            auto adptr = adapter_map["source_input"];
+
+
+            auto weight = 0.99;
+            auto last_processed = adptr->processed;
+            auto avg_throughput = 0.0;
+            auto start_time = std::chrono::steady_clock::now();
+            auto last_time = start_time;
+            while (this->pipeline_running != 0) {
+                auto cur_time = std::chrono::steady_clock::now();
+                std::chrono::duration<double> elapsed = cur_time - start_time;
+                std::chrono::duration<double> delta_t = cur_time - last_time;
+                last_time = cur_time;
+
+                auto processed = adptr->processed;
+                auto delta_proc = processed - last_processed;
+                avg_throughput = weight * avg_throughput + (1 - weight) * delta_proc / delta_t.count();
+                sstream << std::setw(10) << std::setprecision(0) << std::fixed << avg_throughput <<
+                " " << processed;
+
+                sstream << " runtime: " << std::setw(4) << elapsed.count() << " sec\r";
+                std::cout << sstream.str() << std::flush;
+                last_processed = processed;
+                std::this_thread::sleep_for(std::chrono::milliseconds(33));
+            }
 
             std::this_thread::sleep_for(std::chrono::seconds(runtime));
 
@@ -170,8 +241,6 @@ namespace taskflow_pipeline {
 
         // This won't be run until later
         auto task = pipeline.emplace([this, adapter]() {
-            unsigned int a = 0, b = 1;
-
             if (this->pstate == uninitialized and adapter->initialized == 0) {
                 for (auto input = adapter->input_names.begin(); input < adapter->input_names.end(); ++input) {
                     auto parent = this->adapter_map.find(*input);
@@ -192,17 +261,9 @@ namespace taskflow_pipeline {
                 }
                 adapter->initialized = 1;
             } else if (this->pstate == initialized) {
-                if (adapter->running.compare_exchange_strong(a, b)) {
-                    adapter->init();
-
-                    std::thread([this, adapter]() {
-                        boost::fibers::use_scheduling_algorithm<boost::fibers::algo::shared_work>();
-                        while (this->pipeline_running == 1) {
-                            adapter->pump();
-                        }
-                        adapter->running = 0;
-                    }).detach();
-                }
+                adapter->init();
+                std::cout << "Running " << adapter->name << std::endl;
+                adapter->run();
             }
         }).name(sstream.str());
 
