@@ -67,23 +67,18 @@ namespace taskflow_pipeline {
 
             // Setup fiber threadpool.
             if (n_threads == -1) {
-                n_threads = std::thread::hardware_concurrency();
+                n_threads = std::thread::hardware_concurrency() - 2;
             }
             n_threads = std::max(n_threads, (unsigned int)1);
-            fiber_thread_count = 8;
+            fiber_thread_count = n_threads;
 
             std::cout << "Creating threadpool with " << fiber_thread_count << " threads." << std::endl;
-
-            boost::fibers::barrier fiber_init_barrier{fiber_thread_count + 1};
             for (int i = 0; i < fiber_thread_count; i++) {
-                auto worker = std::thread([this, &fiber_init_barrier, i]() {
+                auto worker = std::thread([this, i]() {
                     //boost::fibers::use_scheduling_algorithm<boost::fibers::algo::work_stealing>(10);
                     boost::fibers::use_scheduling_algorithm<boost::fibers::algo::shared_work>();
                     std::stringstream sstream;
-                    sstream << "Fiber lead " << i << " waiting on barrier." << std::flush << std::endl;
-                    std::cout << sstream.str();
-                    sstream.str("");
-                    fiber_init_barrier.wait();
+                    //fiber_init_barrier.wait();
                     this->fiber_pool_mutex.lock();
                     // mtx is unlocked on .wait, and will be acquired again before wait can return.
                     sstream << "Fiber lead " << i << " blocking." << std::flush << std::endl;
@@ -97,7 +92,6 @@ namespace taskflow_pipeline {
                 });
                 fiber_threadpool.push_back(std::move(worker));
             }
-            fiber_init_barrier.wait();
 
             std::stringstream sstream;
             sstream << "Fiber pool initialized, " << fiber_threadpool.size() << " running threads\n";
