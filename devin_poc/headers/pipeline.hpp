@@ -34,13 +34,22 @@ namespace taskflow_pipeline {
 
         std::map <std::string, tf::Task> task_map;
         std::map <std::string, std::shared_ptr<StageAdapterExt>> adapter_map;
+        std::vector <std::shared_ptr<StageAdapterExt>> adapter_launch_vec;
 
         tf::Taskflow pipeline;
         tf::Executor &service_executor;
 
+        unsigned int fiber_thread_count;
         std::vector<std::thread> fiber_threadpool;
         boost::fibers::condition_variable_any fiber_pool_cond_signal;
         boost::fibers::mutex fiber_pool_mutex;
+
+        ~Pipeline() {
+            fiber_pool_cond_signal.notify_all();
+            for (auto it = fiber_threadpool.begin(); it != fiber_threadpool.end(); it++) {
+                (*it).join();
+            }
+        }
 
         Pipeline(tf::Executor &executor, unsigned int n_threads=-1) : fiber_pool_mutex{},
             fiber_pool_cond_signal{}, service_executor{executor} {
@@ -49,8 +58,7 @@ namespace taskflow_pipeline {
 
             pipeline.name(_name);
 
-            auto init = pipeline.emplace([]() {
-                boost::fibers::use_scheduling_algorithm<boost::fibers::algo::shared_work>();
+            auto init = pipeline.emplace([this]() {
             }).name("init");
             task_map[std::string("__init")] = init;
 
@@ -62,41 +70,41 @@ namespace taskflow_pipeline {
                 n_threads = std::thread::hardware_concurrency();
             }
             n_threads = std::max(n_threads, (unsigned int)1);
-            std::cout << "Creating threadpool with " << n_threads << " threads." << std::endl;
+            fiber_thread_count = 8;
 
-            std::cout << "???" << std::endl;
+            std::cout << "Creating threadpool with " << fiber_thread_count << " threads." << std::endl;
 
-            boost::fibers::barrier fiber_init_barrier{n_threads};
-            for (int i = 1; i < n_threads; i++) {
-                auto worker = std::thread([this, &fiber_init_barrier, n_threads, i]() {
-                    std::stringstream sstream;
+            boost::fibers::barrier fiber_init_barrier{fiber_thread_count + 1};
+            for (int i = 0; i < fiber_thread_count; i++) {
+                auto worker = std::thread([this, &fiber_init_barrier, i]() {
+                    //boost::fibers::use_scheduling_algorithm<boost::fibers::algo::work_stealing>(10);
                     boost::fibers::use_scheduling_algorithm<boost::fibers::algo::shared_work>();
-                    sstream << "Fiber lead " << i << " waiting on barrier." << std::endl;
+                    std::stringstream sstream;
+                    sstream << "Fiber lead " << i << " waiting on barrier." << std::flush << std::endl;
                     std::cout << sstream.str();
                     sstream.str("");
                     fiber_init_barrier.wait();
                     this->fiber_pool_mutex.lock();
                     // mtx is unlocked on .wait, and will be acquired again before wait can return.
-                    sstream << "Fiber lead " << i << " blocking." << std::endl;
+                    sstream << "Fiber lead " << i << " blocking." << std::flush << std::endl;
                     std::cout << sstream.str();
                     sstream.str("");
                     this->fiber_pool_cond_signal.wait(this->fiber_pool_mutex);
-                    sstream << "Thread " << i << " terminating." << std::endl;
+                    sstream << "Thread " << i << " terminating." << std::flush << std::endl;
                     std::cout << sstream.str();
+                    std::cout << std::flush;
                     this->fiber_pool_mutex.unlock();
                 });
                 fiber_threadpool.push_back(std::move(worker));
             }
-            boost::fibers::use_scheduling_algorithm<boost::fibers::algo::shared_work>();
             fiber_init_barrier.wait();
 
             std::stringstream sstream;
             sstream << "Fiber pool initialized, " << fiber_threadpool.size() << " running threads\n";
-            std::cout << sstream.str();
+            std::cout << sstream.str() << std::flush;
         }
 
         Pipeline &build() {
-            std::cout << "Building!" << std::endl;
             service_executor.run(pipeline).wait();
             pstate = initialized;
 
@@ -105,13 +113,20 @@ namespace taskflow_pipeline {
 
         Pipeline &start(unsigned int runtime) {
             pipeline_running = 1;
-
-            service_executor.run(pipeline).wait();
+            //service_executor.run(pipeline).wait();
+            std::thread([this](){
+                //boost::fibers::use_scheduling_algorithm<boost::fibers::algo::work_stealing>(11);
+                boost::fibers::use_scheduling_algorithm<boost::fibers::algo::shared_work>();
+                for(auto it = this->adapter_launch_vec.rbegin();
+                            it != this->adapter_launch_vec.rend(); it++) {
+                    (*it)->init();
+                    (*it)->run();
+                }
+            }).detach();
 
             unsigned int freq_ms = 33;
             std::stringstream sstream;
             auto adptr = adapter_map["source_input"];
-
 
             auto weight = 0.99;
             auto last_processed = adptr->processed;
@@ -128,7 +143,7 @@ namespace taskflow_pipeline {
                 auto delta_proc = processed - last_processed;
                 avg_throughput = weight * avg_throughput + (1 - weight) * delta_proc / delta_t.count();
                 sstream << std::setw(10) << std::setprecision(0) << std::fixed << avg_throughput <<
-                " " << processed;
+                " " << std::setw(10) << processed;
 
                 sstream << " runtime: " << std::setw(4) << elapsed.count() << " sec\r";
                 std::cout << sstream.str() << std::flush;
@@ -259,12 +274,15 @@ namespace taskflow_pipeline {
                     padapter->add_subscriber(*input, edge);
                     adapter->add_input(*input, edge);
                 }
+                this->adapter_launch_vec.push_back(adapter);
                 adapter->initialized = 1;
-            } else if (this->pstate == initialized) {
+            } /*
+                // This doesn't seem to play well with boost fibers
+                else if (this->pstate == initialized) {
                 adapter->init();
                 std::cout << "Running " << adapter->name << std::endl;
                 adapter->run();
-            }
+            }*/
         }).name(sstream.str());
 
         if (adapter->input_names.size() == 0) {

@@ -153,11 +153,11 @@ namespace taskflow_pipeline {
         void run() override {
             this->running = 1;
             boost::fibers::fiber(
-                    [this]() {
-                        while (this->running == 1) {
-                            this->pump();
-                        }
-                    }).detach();
+                [this]() {
+                    while (this->running == 1) {
+                        this->pump();
+                    }
+                }).detach();
         }
 
         void dispatch() override {};

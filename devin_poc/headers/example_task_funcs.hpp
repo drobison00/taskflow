@@ -59,7 +59,7 @@ PrimitiveVariant map_random_work_on_json_object(const PrimitiveVariant v) {
 
 PrimitiveVariant map_random_trig_work_and_forward(const PrimitiveVariant v) {
     double MYPI = 3.14159265;
-    int how_many = std::rand() % 100000;
+    int how_many = std::rand() % 1000;
     double random_angle_rads = MYPI * ((double) std::rand() / (double) RAND_MAX);
 
     for (int i = 0; i < how_many;) {
